@@ -54,6 +54,15 @@
 namespace LIBC_NAMESPACE_DECL {
 namespace internal {
 
+LIBC_INLINE size_t fwrite_locked(const void *ptr, size_t size, size_t nmemb,
+                                 ::FILE *stream) {
+#if defined(__APPLE__)
+  return ::fwrite(ptr, size, nmemb, stream);
+#else
+  return ::fwrite_unlocked(ptr, size, nmemb, stream);
+#endif
+}
+
 // Minimal replacement for 'std::vector' that works for trivial types.
 template <typename T> class TempVector {
   static_assert(cpp::is_trivially_constructible<T>::value &&
@@ -329,10 +338,10 @@ LIBC_INLINE static rpc::Status handle_port_impl(rpc::Server::Port &port) {
                 [&](uint64_t size) { return temp_storage.alloc(size); });
     port.send([&](rpc::Buffer *buffer, uint32_t id) {
       flockfile(files[id]);
-      buffer->data[0] = fwrite_unlocked(strs[id], 1, sizes[id], files[id]);
+      buffer->data[0] = fwrite_locked(strs[id], 1, sizes[id], files[id]);
       if (port.get_opcode() == LIBC_WRITE_TO_STDOUT_NEWLINE &&
           buffer->data[0] == sizes[id])
-        buffer->data[0] += fwrite_unlocked("\n", 1, 1, files[id]);
+        buffer->data[0] += fwrite_locked("\n", 1, 1, files[id]);
       funlockfile(files[id]);
     });
     break;
