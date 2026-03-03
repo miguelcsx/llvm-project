@@ -28,6 +28,12 @@ using namespace llvm::object;
 
 namespace {
 
+bool isOffloadingSectionName(StringRef Name) {
+  return Name.starts_with(".llvm.offloading") ||
+         Name.starts_with("__LLVM,__offloading") ||
+         Name.starts_with("__offloading");
+}
+
 /// A MemoryBuffer that shares ownership of the underlying memory.
 /// This allows multiple OffloadBinary instances to share the same buffer.
 class SharedMemoryBuffer : public MemoryBuffer {
@@ -97,7 +103,7 @@ Error extractOffloadFiles(MemoryBufferRef Contents,
 // Extract offloading binaries from an Object file \p Obj.
 Error extractFromObject(const ObjectFile &Obj,
                         SmallVectorImpl<OffloadFile> &Binaries) {
-  assert((Obj.isELF() || Obj.isCOFF()) && "Invalid file type");
+  assert((Obj.isELF() || Obj.isCOFF() || Obj.isMachO()) && "Invalid file type");
 
   for (SectionRef Sec : Obj.sections()) {
     // ELF files contain a section with the LLVM_OFFLOADING type.
@@ -105,13 +111,14 @@ Error extractFromObject(const ObjectFile &Obj,
         static_cast<ELFSectionRef>(Sec).getType() != ELF::SHT_LLVM_OFFLOADING)
       continue;
 
-    // COFF has no section types so we rely on the name of the section.
-    if (Obj.isCOFF()) {
+    // COFF and MachO have no dedicated offloading section type so we rely on
+    // the section name.
+    if (Obj.isCOFF() || Obj.isMachO()) {
       Expected<StringRef> NameOrErr = Sec.getName();
       if (!NameOrErr)
         return NameOrErr.takeError();
 
-      if (!NameOrErr->starts_with(".llvm.offloading"))
+      if (!isOffloadingSectionName(*NameOrErr))
         continue;
     }
 
@@ -149,7 +156,7 @@ Error extractFromBitcode(MemoryBufferRef Buffer,
       continue;
 
     MDString *SectionID = dyn_cast<MDString>(Op->getOperand(1));
-    if (!SectionID || SectionID->getString() != ".llvm.offloading")
+    if (!SectionID || !isOffloadingSectionName(SectionID->getString()))
       continue;
 
     GlobalVariable *GV =
@@ -371,7 +378,11 @@ Error object::extractOffloadBinaries(MemoryBufferRef Buffer,
   case file_magic::elf_relocatable:
   case file_magic::elf_executable:
   case file_magic::elf_shared_object:
-  case file_magic::coff_object: {
+  case file_magic::coff_object:
+  case file_magic::macho_object:
+  case file_magic::macho_executable:
+  case file_magic::macho_bundle:
+  case file_magic::macho_dynamically_linked_shared_lib: {
     Expected<std::unique_ptr<ObjectFile>> ObjFile =
         ObjectFile::createObjectFile(Buffer, Type);
     if (!ObjFile)
@@ -424,6 +435,7 @@ ImageKind object::getImageKind(StringRef Name) {
       .Case("fatbin", IMG_Fatbinary)
       .Case("s", IMG_PTX)
       .Case("spv", IMG_SPIRV)
+      .Case("metallib", IMG_Metallib)
       .Default(IMG_None);
 }
 
@@ -441,6 +453,8 @@ StringRef object::getImageKindName(ImageKind Kind) {
     return "s";
   case IMG_SPIRV:
     return "spv";
+  case IMG_Metallib:
+    return "metallib";
   default:
     return "";
   }

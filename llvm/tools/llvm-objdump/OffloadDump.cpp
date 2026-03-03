@@ -38,6 +38,8 @@ static StringRef getImageName(const OffloadBinary &OB) {
     return "ptx";
   case IMG_SPIRV:
     return "spir-v";
+  case IMG_Metallib:
+    return "metallib";
   default:
     return "<none>";
   }

@@ -56,6 +56,7 @@ static cl::opt<bool>
 
 /// Path of the current binary.
 static const char *PackagerExecutable;
+static constexpr size_t MaxMetadataValueSize = 1 << 20; // 1 MiB
 
 // Get a map containing all the arguments for the image. Repeated arguments will
 // be placed in a comma separated list.
@@ -82,6 +83,28 @@ static Error writeFile(StringRef Filename, StringRef Data) {
   if (Error E = Output->commit())
     return E;
   return Error::success();
+}
+
+static Expected<std::string> getMetadataValue(StringRef Key, StringRef Value) {
+  if (!Value.starts_with("@"))
+    return Value.str();
+
+  StringRef Filename = Value.drop_front();
+  if (Filename.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "metadata key '" + Key +
+                                 "' uses an empty file reference");
+
+  auto BufferOrErr = MemoryBuffer::getFileOrSTDIN(Filename);
+  if (std::error_code EC = BufferOrErr.getError())
+    return createFileError(Filename, EC);
+  if ((*BufferOrErr)->getBufferSize() > MaxMetadataValueSize)
+    return createStringError(inconvertibleErrorCode(),
+                             "metadata key '" + Key +
+                                 "' exceeds the maximum supported size (" +
+                                 Twine(MaxMetadataValueSize) + " bytes)");
+
+  return (*BufferOrErr)->getBuffer().str();
 }
 
 static Error bundleImages() {
@@ -118,7 +141,10 @@ static Error bundleImages() {
         if (Key == "kind") {
           ImageBinary.TheOffloadKind = getOffloadKind(Value);
         } else if (Key != "file") {
-          ImageBinary.StringData[Key] = Value;
+          auto MetadataValueOrErr = getMetadataValue(Key, Value);
+          if (!MetadataValueOrErr)
+            return MetadataValueOrErr.takeError();
+          ImageBinary.StringData[Key] = Saver.save(*MetadataValueOrErr);
         }
       }
       llvm::SmallString<0> Buffer = OffloadBinary::write(ImageBinary);
