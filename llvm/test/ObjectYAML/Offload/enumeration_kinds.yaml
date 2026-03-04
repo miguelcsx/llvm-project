@@ -11,6 +11,8 @@ Members:
     OffloadKind:      OFK_HIP
   - ImageKind:        IMG_Fatbinary
   - ImageKind:        IMG_PTX
+  - ImageKind:        IMG_SPIRV
+  - ImageKind:        IMG_Metallib
   - ImageKind:        999
     OffloadKind:      999
 
@@ -32,6 +34,12 @@ Members:
 # CHECK-NEXT:     OffloadKind:     OFK_None
 # CHECK-NEXT:     Flags:           0
 # CHECK-NEXT:   - ImageKind:       IMG_PTX
+# CHECK-NEXT:     OffloadKind:     OFK_None
+# CHECK-NEXT:     Flags:           0
+# CHECK-NEXT:   - ImageKind:       IMG_SPIRV
+# CHECK-NEXT:     OffloadKind:     OFK_None
+# CHECK-NEXT:     Flags:           0
+# CHECK-NEXT:   - ImageKind:       IMG_Metallib
 # CHECK-NEXT:     OffloadKind:     OFK_None
 # CHECK-NEXT:     Flags:           0
 # CHECK-NEXT:   - ImageKind:       0x3E7
