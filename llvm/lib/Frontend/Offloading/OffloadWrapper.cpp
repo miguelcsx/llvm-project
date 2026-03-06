@@ -40,6 +40,16 @@ namespace {
 constexpr unsigned CudaFatMagic = 0x466243b1;
 constexpr unsigned HIPFatMagic = 0x48495046;
 
+static std::string getOffloadingImageSection(const Triple &Triple,
+                                             bool Relocatable) {
+  if (Triple.isOSBinFormatMachO())
+    // The wrapper object contains data relocations from descriptor structs
+    // into the image section. Apple's linker rejects relocations pointing
+    // into the __LLVM segment, so use a standard data section instead.
+    return Relocatable ? "__DATA,__offld_img_rel" : "__DATA,__offld_img";
+  return Relocatable ? ".llvm.offloading.relocatable" : ".llvm.offloading";
+}
+
 IntegerType *getSizeTTy(Module &M) {
   return M.getDataLayout().getIntPtrType(M.getContext());
 }
@@ -141,8 +151,8 @@ GlobalVariable *createBinDesc(Module &M, ArrayRef<ArrayRef<char>> Bufs,
                                      GlobalVariable::InternalLinkage, Data,
                                      ".omp_offloading.device_image" + Suffix);
     Image->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-    Image->setSection(Relocatable ? ".llvm.offloading.relocatable"
-                                  : ".llvm.offloading");
+    Image->setSection(
+        getOffloadingImageSection(Triple(M.getTargetTriple()), Relocatable));
     Image->setAlignment(Align(object::OffloadBinary::getAlignment()));
 
     StringRef Binary(Buf.data(), Buf.size());
@@ -207,7 +217,8 @@ Function *createUnregisterFunction(Module &M, GlobalVariable *BinDesc,
   auto *Func =
       Function::Create(FuncTy, GlobalValue::InternalLinkage,
                        ".omp_offloading.descriptor_unreg" + Suffix, &M);
-  Func->setSection(".text.startup");
+  if (!M.getTargetTriple().isOSBinFormatMachO())
+    Func->setSection(".text.startup");
 
   // Get __tgt_unregister_lib function declaration.
   auto *UnRegFuncTy = FunctionType::get(Type::getVoidTy(C), getBinDescPtrTy(M),
@@ -229,7 +240,8 @@ void createRegisterFunction(Module &M, GlobalVariable *BinDesc,
   auto *FuncTy = FunctionType::get(Type::getVoidTy(C), /*isVarArg*/ false);
   auto *Func = Function::Create(FuncTy, GlobalValue::InternalLinkage,
                                 ".omp_offloading.descriptor_reg" + Suffix, &M);
-  Func->setSection(".text.startup");
+  if (!M.getTargetTriple().isOSBinFormatMachO())
+    Func->setSection(".text.startup");
 
   // Get __tgt_register_lib function declaration.
   auto *RegFuncTy = FunctionType::get(Type::getVoidTy(C), getBinDescPtrTy(M),
@@ -942,9 +954,9 @@ private:
         Type::getInt8Ty(C), static_cast<uint8_t>(OB.getOffloadKind()));
     Constant *ImageKindConstant = ConstantInt::get(
         Type::getInt8Ty(C), static_cast<uint8_t>(OB.getImageKind()));
-    StringRef Triple = OB.getString("triple");
-    Constant *TripleConstant =
-        addStringToModule(Triple, Twine(OffloadKindTag) + "target." + ImageID);
+    StringRef ImageTriple = OB.getString("triple");
+    Constant *TripleConstant = addStringToModule(
+        ImageTriple, Twine(OffloadKindTag) + "target." + ImageID);
     Constant *CompileOptions =
         addStringToModule(Options.CompileOptions,
                           Twine(OffloadKindTag) + "opts.compile." + ImageID);
@@ -957,9 +969,11 @@ private:
         Constant::getNullValue(PointerType::getUnqual(C))};
 
     StringRef RawImage = OB.getImage();
-    std::pair<Constant *, Constant *> Binary = addArrayToModule(
-        ArrayRef<char>(RawImage.begin(), RawImage.end()),
-        Twine(OffloadKindTag) + ImageID + ".data", ".llvm.offloading");
+    std::pair<Constant *, Constant *> Binary =
+        addArrayToModule(ArrayRef<char>(RawImage.begin(), RawImage.end()),
+                         Twine(OffloadKindTag) + ImageID + ".data",
+                         getOffloadingImageSection(Triple(M.getTargetTriple()),
+                                                   /*Relocatable=*/false));
 
     // For SYCL images offload entries are defined here per image.
     std::pair<Constant *, Constant *> ImageEntriesPtrs =

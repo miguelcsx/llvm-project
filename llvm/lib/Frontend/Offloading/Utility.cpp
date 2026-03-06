@@ -23,6 +23,46 @@
 using namespace llvm;
 using namespace llvm::offloading;
 
+static StringRef getOffloadingStringSection(const Triple &Triple) {
+  if (Triple.isOSBinFormatMachO())
+    // Entry name strings are referenced via data relocations from offload entry
+    // structs. They must be in a standard data section, not __LLVM, because
+    // Apple's linker rejects relocations pointing into the __LLVM segment.
+    return "__TEXT,__const";
+  return ".llvm.rodata.offloading";
+}
+
+static StringRef getMachOOffloadEntrySectionName(StringRef SectionName) {
+  if (SectionName == "llvm_offload_entries")
+    return "omp_offld";
+  return SectionName;
+}
+
+static std::string getOffloadEntrySection(const Triple &Triple,
+                                          StringRef SectionName) {
+  if (Triple.isOSBinFormatMachO())
+    return ("__DATA,__" + getMachOOffloadEntrySectionName(SectionName)).str();
+  return SectionName.str();
+}
+
+static std::string getOffloadEntryArrayBeginSymbol(const Triple &Triple,
+                                                   StringRef SectionName) {
+  if (Triple.isOSBinFormatMachO())
+    return ("\1section$start$__DATA$__" +
+            getMachOOffloadEntrySectionName(SectionName))
+        .str();
+  return ("__start_" + SectionName).str();
+}
+
+static std::string getOffloadEntryArrayEndSymbol(const Triple &Triple,
+                                                 StringRef SectionName) {
+  if (Triple.isOSBinFormatMachO())
+    return ("\1section$end$__DATA$__" +
+            getMachOOffloadEntrySectionName(SectionName))
+        .str();
+  return ("__stop_" + SectionName).str();
+}
+
 StructType *offloading::getEntryTy(Module &M) {
   LLVMContext &C = M.getContext();
   StructType *EntryTy =
@@ -49,16 +89,19 @@ offloading::getOffloadingEntryInitializer(Module &M, object::OffloadKind Kind,
 
   Constant *AddrName = ConstantDataArray::getString(M.getContext(), Name);
 
-  StringRef Prefix =
+  std::string Prefix =
       Triple.isNVPTX() ? "$offloading$entry_name" : ".offloading.entry_name";
+  std::string SymbolName =
+      Prefix + (Triple.isOSBinFormatMachO() ? "." + Name.str() : "");
+  // MachO ARM64 requires globally visible symbols for unsigned relocations.
+  auto Linkage = Triple.isOSBinFormatMachO() ? GlobalValue::ExternalLinkage
+                                             : GlobalValue::InternalLinkage;
 
   // Create the constant string used to look up the symbol in the device.
-  auto *Str =
-      new GlobalVariable(M, AddrName->getType(), /*isConstant=*/true,
-                         GlobalValue::InternalLinkage, AddrName, Prefix);
-  StringRef SectionName = ".llvm.rodata.offloading";
+  auto *Str = new GlobalVariable(M, AddrName->getType(), /*isConstant=*/true,
+                                 Linkage, AddrName, SymbolName);
   Str->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-  Str->setSection(SectionName);
+  Str->setSection(getOffloadingStringSection(Triple));
   Str->setAlignment(Align(1));
 
   // Make a metadata node for these constants so it can be queried from IR.
@@ -91,20 +134,24 @@ offloading::emitOffloadingEntry(Module &M, object::OffloadKind Kind,
 
   auto [EntryInitializer, NameGV] = getOffloadingEntryInitializer(
       M, Kind, Addr, Name, Size, Flags, Data, AuxAddr);
+  (void)NameGV;
 
   StringRef Prefix =
       Triple.isNVPTX() ? "$offloading$entry$" : ".offloading.entry.";
-  auto *Entry = new GlobalVariable(
-      M, getEntryTy(M),
-      /*isConstant=*/true, GlobalValue::WeakAnyLinkage, EntryInitializer,
-      Prefix + Name, nullptr, GlobalValue::NotThreadLocal,
-      M.getDataLayout().getDefaultGlobalsAddressSpace());
+  // MachO ARM64 linker rejects weak symbols in these relocation sites.
+  auto Linkage = Triple.isOSBinFormatMachO() ? GlobalValue::ExternalLinkage
+                                             : GlobalValue::WeakAnyLinkage;
+  auto *Entry =
+      new GlobalVariable(M, getEntryTy(M),
+                         /*isConstant=*/true, Linkage, EntryInitializer,
+                         Prefix + Name, nullptr, GlobalValue::NotThreadLocal,
+                         M.getDataLayout().getDefaultGlobalsAddressSpace());
 
   // The entry has to be created in the section the linker expects it to be.
   if (Triple.isOSBinFormatCOFF())
     Entry->setSection((SectionName + "$OE").str());
   else
-    Entry->setSection(SectionName);
+    Entry->setSection(getOffloadEntrySection(Triple, SectionName));
   Entry->setAlignment(Align(object::OffloadBinary::getAlignment()));
   return Entry;
 }
@@ -122,11 +169,11 @@ offloading::getOffloadEntryArray(Module &M, StringRef SectionName) {
 
   auto *EntriesB =
       new GlobalVariable(M, EntryType, /*isConstant=*/true, Linkage, EntryInit,
-                         "__start_" + SectionName);
+                         getOffloadEntryArrayBeginSymbol(Triple, SectionName));
   EntriesB->setVisibility(GlobalValue::HiddenVisibility);
   auto *EntriesE =
       new GlobalVariable(M, EntryType, /*isConstant=*/true, Linkage, EntryInit,
-                         "__stop_" + SectionName);
+                         getOffloadEntryArrayEndSymbol(Triple, SectionName));
   EntriesE->setVisibility(GlobalValue::HiddenVisibility);
 
   if (Triple.isOSBinFormatELF()) {
@@ -140,7 +187,7 @@ offloading::getOffloadEntryArray(Module &M, StringRef SectionName) {
     DummyEntry->setSection(SectionName);
     DummyEntry->setAlignment(Align(object::OffloadBinary::getAlignment()));
     appendToCompilerUsed(M, DummyEntry);
-  } else {
+  } else if (Triple.isOSBinFormatCOFF()) {
     // The COFF linker will merge sections containing a '$' together into a
     // single section. The order of entries in this section will be sorted
     // alphabetically by the characters following the '$' in the name. Set the
