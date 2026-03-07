@@ -14,6 +14,8 @@
 // RUN:   --linker-path=/usr/bin/ld %t.o -o a.out 2>&1 | FileCheck %s --check-prefixes=OPENMP-ELF,OPENMP-REL
 // RUN: clang-linker-wrapper --print-wrapped-module --dry-run --host-triple=x86_64-unknown-windows-gnu \
 // RUN:   --linker-path=/usr/bin/ld %t.o -o a.out 2>&1 | FileCheck %s --check-prefixes=OPENMP,OPENMP-COFF
+// RUN: clang-linker-wrapper --print-wrapped-module --dry-run --host-triple=x86_64-apple-darwin \
+// RUN:   --linker-path=/usr/bin/ld %t.o -o a.out 2>&1 | FileCheck %s --check-prefix=OPENMP-MACHO
 
 //      OPENMP-ELF: @__start_llvm_offload_entries = external hidden constant [0 x %struct.__tgt_offload_entry]
 // OPENMP-ELF-NEXT: @__stop_llvm_offload_entries = external hidden constant [0 x %struct.__tgt_offload_entry]
@@ -21,6 +23,13 @@
 
 //      OPENMP-COFF: @__start_llvm_offload_entries = weak_odr hidden constant [0 x %struct.__tgt_offload_entry] zeroinitializer, section "llvm_offload_entries$OA"
 // OPENMP-COFF-NEXT: @__stop_llvm_offload_entries = weak_odr hidden constant [0 x %struct.__tgt_offload_entry] zeroinitializer, section "llvm_offload_entries$OZ"
+
+//      OPENMP-MACHO: @"\01section$start$__DATA$__omp_offld" = external hidden constant [0 x %struct.__tgt_offload_entry]
+// OPENMP-MACHO-NEXT: @"\01section$end$__DATA$__omp_offld" = external hidden constant [0 x %struct.__tgt_offload_entry]
+// OPENMP-MACHO-NEXT: @.omp_offloading.device_image = internal unnamed_addr constant [[[SIZE:[0-9]+]] x i8] c"\10\FF\10\AD{{.*}}", section "__LLVM,__offloading", align 8
+// OPENMP-MACHO-NEXT: @.omp_offloading.device_images = internal unnamed_addr constant [1 x %__tgt_device_image] [%__tgt_device_image { ptr getelementptr ([[[IMG_OFF:[0-9]+]] x i8], ptr @.omp_offloading.device_image, i64 0, i64 [[IMG_OFF]]), ptr getelementptr ([[[IMG_OFF]] x i8], ptr @.omp_offloading.device_image, i64 0, i64 [[IMG_OFF]]), ptr @"\01section$start$__DATA$__omp_offld", ptr @"\01section$end$__DATA$__omp_offld" }]
+// OPENMP-MACHO-NEXT: @.omp_offloading.descriptor = internal constant %__tgt_bin_desc { i32 1, ptr @.omp_offloading.device_images, ptr @"\01section$start$__DATA$__omp_offld", ptr @"\01section$end$__DATA$__omp_offld" }
+// OPENMP-MACHO-NEXT: @llvm.global_ctors = appending global [1 x { i32, ptr, ptr }] [{ i32, ptr, ptr } { i32 101, ptr @.omp_offloading.descriptor_reg, ptr null }]
 
 // OPENMP-REL: @.omp_offloading.device_image = internal unnamed_addr constant [[[SIZE:[0-9]+]] x i8] c"\10\FF\10\AD{{.*}}", section ".llvm.offloading.relocatable", align 8
 
