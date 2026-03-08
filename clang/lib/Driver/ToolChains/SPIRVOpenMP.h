@@ -23,6 +23,12 @@ public:
       const llvm::opt::ArgList &DriverArgs, llvm::opt::ArgStringList &CC1Args,
       Action::OffloadKind DeviceOffloadingKind) const override;
 
+  std::string ComputeLLVMTriple(const llvm::opt::ArgList &Args,
+                                types::ID InputType) const override;
+
+  llvm::Expected<llvm::SmallVector<std::string>>
+  getSystemGPUArchs(const llvm::opt::ArgList &Args) const override;
+
   const ToolChain &HostTC;
 };
 } // namespace clang::driver::toolchains
