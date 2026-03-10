@@ -31,6 +31,8 @@ def dry_run : Flag<["--"], "dry-run">,
   HelpText<"Print program arguments without running">;
 def verbose : Flag<["--"], "wrapper-verbose">,
   Flags<[WrapperOnlyOption]>, HelpText<"Verbose output from tools">;
+def verbose_long : Flag<["--"], "verbose">,
+  Flags<[WrapperOnlyOption, HelpHidden]>, Alias<verbose>;
 def embed_bitcode : Flag<["--"], "embed-bitcode">,
                     Flags<[WrapperOnlyOption]>,
                     HelpText<"Embed linked bitcode in the module">;
@@ -57,8 +59,21 @@ def wrapper_jobs : Joined<["--"], "wrapper-jobs=">,
             "positive integer or 'jobserver'.">;
 
 def override_image : Joined<["--"], "override-image=">,
-  Flags<[WrapperOnlyOption]>, MetaVarName<"<kind=file>">,
+  Flags<[WrapperOnlyOption]>, MetaVarName<"<kind=file[,key=value...]>">,
   HelpText<"Uses the provided file as if it were the output of the device link step">;
+
+def metal_translation_path_EQ : Joined<["--"], "metal-translation-path=">,
+  Flags<[WrapperOnlyOption, HelpHidden]>, MetaVarName<"<path>">,
+  HelpText<"Path to the SPIR-V to Metal source translator executable">;
+def metal_compiler_path_EQ : Joined<["--"], "metal-compiler-path=">,
+  Flags<[WrapperOnlyOption, HelpHidden]>, MetaVarName<"<path>">,
+  HelpText<"Path to the Metal source compiler executable">;
+def metallib_path_EQ : Joined<["--"], "metallib-path=">,
+  Flags<[WrapperOnlyOption, HelpHidden]>, MetaVarName<"<path>">,
+  HelpText<"Path to the metallib linker executable">;
+def metal_sdk_EQ : Joined<["--"], "metal-sdk=">,
+  Flags<[WrapperOnlyOption, HelpHidden]>, MetaVarName<"<name-or-path>">,
+  HelpText<"Metal SDK name for xcrun, or explicit SDK path passed through SDKROOT">;
 
 def should_extract : CommaJoined<["--"], "should-extract=">,
   Flags<[WrapperOnlyOption]>, MetaVarName<"<kind=file>">,
@@ -123,8 +138,19 @@ def library_EQ : Joined<["--", "-"], "library=">, Flags<[HelpHidden]>,
 def rpath : Separate<["--", "-"], "rpath">;
 def rpath_EQ : Joined<["--", "-"], "rpath=">, Flags<[HelpHidden]>, Alias<rpath>;
 
-def v : Flag<["--", "-"], "v">, HelpText<"Display the version number and exit">;
-def version : Flag<["--", "-"], "version">, Flags<[HelpHidden]>, Alias<v>;
+// Darwin linker options that would otherwise conflict with generic parsing.
+def lto_library : Separate<["-"], "lto_library">, Flags<[HelpHidden]>;
+def syslibroot : Separate<["-"], "syslibroot">, Flags<[HelpHidden]>;
+def platform_version : Separate<["-"], "platform_version">,
+  Flags<[HelpHidden]>;
+def arch : Separate<["-"], "arch">, Flags<[HelpHidden]>;
+def dynamic : Flag<["-"], "dynamic">, Flags<[HelpHidden]>;
+def no_deduplicate : Flag<["-"], "no_deduplicate">, Flags<[HelpHidden]>;
+
+def v : Flag<["--", "-"], "v">, Flags<[WrapperOnlyOption]>,
+  HelpText<"Display the version number and exit">;
+def version : Flag<["--", "-"], "version">, Flags<[HelpHidden, WrapperOnlyOption]>,
+  Alias<v>;
 
 def whole_archive : Flag<["--", "-"], "whole-archive">, Flags<[HelpHidden]>;
 def no_whole_archive : Flag<["--", "-"], "no-whole-archive">, Flags<[HelpHidden]>;

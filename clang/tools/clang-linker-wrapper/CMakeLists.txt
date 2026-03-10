@@ -29,6 +29,7 @@ endif()
 
 add_clang_tool(clang-linker-wrapper
   ClangLinkerWrapper.cpp
+  Metal.cpp
 
   DEPENDS
   ${tablegen_deps}
