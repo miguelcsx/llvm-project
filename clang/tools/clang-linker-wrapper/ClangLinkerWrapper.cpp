@@ -14,6 +14,7 @@
 //
 //===---------------------------------------------------------------------===//
 
+#include "Metal.h"
 #include "clang/Basic/TargetID.h"
 #include "clang/Basic/Version.h"
 #include "llvm/ADT/MapVector.h"
@@ -22,6 +23,7 @@
 #include "llvm/CodeGen/CommandFlags.h"
 #include "llvm/Frontend/Offloading/OffloadWrapper.h"
 #include "llvm/Frontend/Offloading/Utility.h"
+#include "llvm/Frontend/OpenMP/KernelEnvironment.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Module.h"
@@ -44,7 +46,9 @@
 #include "llvm/Support/Errc.h"
 #include "llvm/Support/FileOutputBuffer.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Parallel.h"
 #include "llvm/Support/Path.h"
@@ -139,6 +143,7 @@ static std::list<SmallString<128>> TempFiles;
 
 /// Codegen flags for LTO backend.
 static codegen::RegisterCodeGenFlags CodeGenFlags;
+static constexpr size_t MaxMetadataValueSize = 1 << 20; // 1 MiB
 
 using OffloadingImage = OffloadBinary::OffloadingImage;
 
@@ -243,12 +248,13 @@ Expected<StringRef> createOutputFile(const Twine &Prefix, StringRef Extension) {
 }
 
 /// Execute the command \p ExecutablePath with the arguments \p Args.
-Error executeCommands(StringRef ExecutablePath, ArrayRef<StringRef> Args) {
+Error executeCommands(StringRef ExecutablePath, ArrayRef<StringRef> Args,
+                      std::optional<ArrayRef<StringRef>> Env = std::nullopt) {
   if (Verbose || DryRun)
     printCommands(Args);
 
   if (!DryRun)
-    if (sys::ExecuteAndWait(ExecutablePath, Args))
+    if (sys::ExecuteAndWait(ExecutablePath, Args, Env))
       return createStringError(
           "'%s' failed", sys::path::filename(ExecutablePath).str().c_str());
   return Error::success();
@@ -372,6 +378,78 @@ void printVersion(raw_ostream &OS) {
   OS << clang::getClangToolFullVersion("clang-linker-wrapper") << '\n';
 }
 
+static Expected<DenseMap<StringRef, StringRef>>
+getKeyValueArguments(StringRef Input, StringSaver &Saver) {
+  DenseMap<StringRef, StringRef> Args;
+  for (StringRef Arg : llvm::split(Input, ",")) {
+    if (Arg.empty())
+      continue;
+
+    auto [Key, Value] = Arg.split("=");
+    if (Key.empty())
+      return createStringError("encountered empty metadata key");
+    if (Value.empty())
+      return createStringError(Twine("metadata key '") + Key +
+                               "' is missing a value");
+
+    auto [It, Inserted] = Args.try_emplace(Saver.save(Key), Saver.save(Value));
+    if (!Inserted)
+      return createStringError(Twine("duplicate metadata key '") + Key + "'");
+  }
+  return Args;
+}
+
+static Expected<std::string> getMetadataValue(StringRef Key, StringRef Value) {
+  if (!Value.starts_with("@"))
+    return Value.str();
+
+  StringRef Filename = Value.drop_front();
+  if (Filename.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             Twine("metadata key '") + Key +
+                                 "' uses an empty file reference");
+
+  auto BufferOrErr = MemoryBuffer::getFileOrSTDIN(Filename);
+  if (std::error_code EC = BufferOrErr.getError())
+    return createFileError(Filename, EC);
+  if ((*BufferOrErr)->getBufferSize() > MaxMetadataValueSize)
+    return createStringError(Twine("metadata key '") + Key +
+                             "' exceeds the maximum supported size (" +
+                             Twine(MaxMetadataValueSize) + " bytes)");
+
+  return (*BufferOrErr)->getBuffer().str();
+}
+
+static ImageKind inferImageKind(StringRef Filename, MemoryBufferRef Buffer) {
+  if (identify_magic(Buffer.getBuffer()) == file_magic::bitcode)
+    return IMG_Bitcode;
+
+  if (Expected<std::unique_ptr<ObjectFile>> ObjOrErr =
+          ObjectFile::createObjectFile(Buffer))
+    return IMG_Object;
+  else
+    consumeError(ObjOrErr.takeError());
+
+  if (sys::path::has_extension(Filename))
+    return getImageKind(sys::path::extension(Filename).drop_front());
+
+  return IMG_None;
+}
+
+static Expected<FinalizedImageFile> finalizeLinkedImage(StringRef InputFile,
+                                                        const ArgList &Args,
+                                                        OffloadKind Kind) {
+  Triple Triple(Args.getLastArgValue(OPT_triple_EQ));
+  StringRef Arch = Args.getLastArgValue(OPT_arch_EQ);
+  if (isMetalOpenMPTarget(Triple, Arch, Kind))
+    return finalizeMetalOpenMPImage(InputFile, Args, Triple, createOutputFile,
+                                    findProgram, executeCommands);
+
+  return FinalizedImageFile{
+      InputFile, Args.hasArg(OPT_embed_bitcode) ? IMG_Bitcode : IMG_Object,
+      /*NeedsContainerization=*/true};
+}
+
 namespace nvptx {
 Expected<StringRef>
 fatbinary(ArrayRef<std::pair<StringRef, StringRef>> InputFiles,
@@ -488,6 +566,10 @@ Expected<StringRef> clang(ArrayRef<StringRef> InputFiles, const ArgList &Args,
 
   const llvm::Triple Triple(Args.getLastArgValue(OPT_triple_EQ));
   StringRef Arch = Args.getLastArgValue(OPT_arch_EQ);
+  const bool IsMetalOpenMP = (ActiveOffloadKindMask & OFK_OpenMP) &&
+                             isMetalOpenMPTarget(Triple, Arch, OFK_OpenMP);
+  const llvm::Triple ToolchainTriple =
+      IsMetalOpenMP ? getMetalOpenMPToolchainTriple(Triple) : Triple;
   // Create a new file to write the linked device image to. Assume that the
   // input filename already has the device and architecture.
   std::string OutputFileBase =
@@ -508,22 +590,33 @@ Expected<StringRef> clang(ArrayRef<StringRef> InputFiles, const ArgList &Args,
       // Clang to instead place them alongside the final executable.
       "-dumpdir",
       Args.MakeArgString(ExecutableName + OutputFileBase + ".img."),
-      Args.MakeArgString("--target=" + Triple.getTriple()),
+      Args.MakeArgString("--target=" + ToolchainTriple.getTriple()),
   };
 
-  if (!Arch.empty())
+  if (!Arch.empty() && !IsMetalOpenMP)
     Triple.isAMDGPU() ? CmdArgs.push_back(Args.MakeArgString("-mcpu=" + Arch))
                       : CmdArgs.push_back(Args.MakeArgString("-march=" + Arch));
+
+  const bool AllBitcodeInputs =
+      llvm::all_of(InputFiles, [](StringRef InputFile) {
+        file_magic Magic;
+        return !identify_magic(InputFile, Magic) &&
+               Magic == file_magic::bitcode;
+      });
+  if (Triple.isSPIRV() && AllBitcodeInputs)
+    CmdArgs.append({"-x", "ir"});
 
   // AMDGPU is always in LTO mode currently.
   if (Triple.isAMDGPU())
     CmdArgs.push_back("-flto");
 
   // Forward all of the `--offload-opt` and similar options to the device.
-  for (auto &Arg : Args.filtered(OPT_offload_opt_eq_minus, OPT_mllvm))
-    CmdArgs.append(
-        {"-Xlinker",
-         Args.MakeArgString("--plugin-opt=" + StringRef(Arg->getValue()))});
+  // SPIR-V uses spirv-link which does not support LTO plugin options.
+  if (!Triple.isSPIRV())
+    for (auto &Arg : Args.filtered(OPT_offload_opt_eq_minus, OPT_mllvm))
+      CmdArgs.append(
+          {"-Xlinker",
+           Args.MakeArgString("--plugin-opt=" + StringRef(Arg->getValue()))});
 
   if (!Triple.isNVPTX() && !Triple.isSPIRV())
     CmdArgs.push_back("-Wl,--no-undefined");
@@ -564,9 +657,10 @@ Expected<StringRef> clang(ArrayRef<StringRef> InputFiles, const ArgList &Args,
   }
 
   // Pass on -mllvm options to the linker invocation.
-  for (const opt::Arg *Arg : Args.filtered(OPT_mllvm))
-    CmdArgs.append({"-Xlinker", Args.MakeArgString(
-                                    "-mllvm=" + StringRef(Arg->getValue()))});
+  if (!Triple.isSPIRV())
+    for (const opt::Arg *Arg : Args.filtered(OPT_mllvm))
+      CmdArgs.append({"-Xlinker", Args.MakeArgString(
+                                      "-mllvm=" + StringRef(Arg->getValue()))});
 
   if (SaveTemps && linkerSupportsLTO(Args))
     CmdArgs.push_back("-Wl,--save-temps");
@@ -807,8 +901,9 @@ Expected<SmallVector<std::unique_ptr<MemoryBuffer>>>
 bundleCuda(ArrayRef<OffloadingImage> Images, const ArgList &Args) {
   SmallVector<std::pair<StringRef, StringRef>, 4> InputFiles;
   for (const OffloadingImage &Image : Images)
-    InputFiles.emplace_back(std::make_pair(Image.Image->getBufferIdentifier(),
-                                           Image.StringData.lookup("arch")));
+    InputFiles.emplace_back(
+        std::make_pair(Image.Image->getBufferIdentifier(),
+                       Image.StringData.lookup(omp::offload::ArchKey)));
 
   auto FileOrErr = nvptx::fatbinary(InputFiles, Args);
   if (!FileOrErr)
@@ -829,9 +924,10 @@ Expected<SmallVector<std::unique_ptr<MemoryBuffer>>>
 bundleHIP(ArrayRef<OffloadingImage> Images, const ArgList &Args) {
   SmallVector<std::tuple<StringRef, StringRef, StringRef>, 4> InputFiles;
   for (const OffloadingImage &Image : Images)
-    InputFiles.emplace_back(std::make_tuple(Image.Image->getBufferIdentifier(),
-                                            Image.StringData.lookup("triple"),
-                                            Image.StringData.lookup("arch")));
+    InputFiles.emplace_back(
+        std::make_tuple(Image.Image->getBufferIdentifier(),
+                        Image.StringData.lookup(omp::offload::TripleKey),
+                        Image.StringData.lookup(omp::offload::ArchKey)));
 
   auto FileOrErr = amdgcn::fatbinary(InputFiles, Args);
   if (!FileOrErr)
@@ -931,33 +1027,112 @@ Error handleOverrideImages(
     const InputArgList &Args,
     MapVector<OffloadKind, SmallVector<OffloadingImage, 0>> &Images) {
   for (StringRef Arg : Args.getAllArgValues(OPT_override_image)) {
-    OffloadKind Kind = getOffloadKind(Arg.split("=").first);
-    StringRef Filename = Arg.split("=").second;
+    BumpPtrAllocator Alloc;
+    StringSaver Saver(Alloc);
+
+    auto [KindString, ImageSpec] = Arg.split("=");
+    OffloadKind Kind = getOffloadKind(KindString);
+    if (Kind == OFK_None)
+      return createStringError(Twine("unknown override image kind '") +
+                               KindString + "'");
+
+    DenseMap<StringRef, StringRef> ImageArgs;
+    if (ImageSpec.starts_with("file=")) {
+      auto ParsedArgsOrErr = getKeyValueArguments(ImageSpec, Saver);
+      if (!ParsedArgsOrErr)
+        return ParsedArgsOrErr.takeError();
+      ImageArgs = std::move(*ParsedArgsOrErr);
+    } else {
+      auto [Filename, Metadata] = ImageSpec.split(",");
+      if (Filename.empty())
+        return createStringError(Twine("override image '") + Arg +
+                                 "' is missing a file");
+      ImageArgs["file"] = Saver.save(Filename);
+      if (!Metadata.empty()) {
+        auto ParsedArgsOrErr = getKeyValueArguments(Metadata, Saver);
+        if (!ParsedArgsOrErr)
+          return ParsedArgsOrErr.takeError();
+        for (const auto &[Key, Value] : *ParsedArgsOrErr) {
+          if (!ImageArgs.try_emplace(Key, Value).second)
+            return createStringError(Twine("duplicate metadata key '") + Key +
+                                     "' in override image '" + Arg + "'");
+        }
+      }
+    }
+
+    auto It = ImageArgs.find("file");
+    if (It == ImageArgs.end())
+      return createStringError(Twine("override image '") + Arg +
+                               "' is missing a file");
+    StringRef Filename = It->second;
 
     ErrorOr<std::unique_ptr<MemoryBuffer>> BufferOrErr =
         MemoryBuffer::getFileOrSTDIN(Filename);
     if (std::error_code EC = BufferOrErr.getError())
       return createFileError(Filename, EC);
 
-    Expected<std::unique_ptr<ObjectFile>> ElfOrErr =
-        ObjectFile::createELFObjectFile(**BufferOrErr,
-                                        /*InitContent=*/false);
-    if (!ElfOrErr)
-      return ElfOrErr.takeError();
-    ObjectFile &Elf = **ElfOrErr;
-
     OffloadingImage TheImage{};
-    TheImage.TheImageKind = IMG_Object;
+    TheImage.TheImageKind =
+        inferImageKind(Filename, (*BufferOrErr)->getMemBufferRef());
+    if (TheImage.TheImageKind == IMG_None)
+      return createStringError(Twine("unable to infer image kind for '") +
+                               Filename + "'");
     TheImage.TheOffloadKind = Kind;
-    TheImage.StringData["triple"] =
-        Args.MakeArgString(Elf.makeTriple().getTriple());
-    if (std::optional<StringRef> CPU = Elf.tryGetCPUName())
-      TheImage.StringData["arch"] = Args.MakeArgString(*CPU);
+    if (TheImage.TheImageKind == IMG_Object) {
+      auto ObjOrErr =
+          ObjectFile::createObjectFile((*BufferOrErr)->getMemBufferRef());
+      if (!ObjOrErr)
+        return ObjOrErr.takeError();
+      ObjectFile &Obj = **ObjOrErr;
+      TheImage.StringData[omp::offload::TripleKey] =
+          Args.MakeArgString(Obj.makeTriple().getTriple());
+      if (std::optional<StringRef> CPU = Obj.tryGetCPUName())
+        TheImage.StringData[omp::offload::ArchKey] = Args.MakeArgString(*CPU);
+    }
+
+    for (const auto &[Key, Value] : ImageArgs) {
+      if (Key == "file" || Key == "kind")
+        continue;
+
+      auto MetadataValueOrErr = getMetadataValue(Key, Value);
+      if (!MetadataValueOrErr)
+        return MetadataValueOrErr.takeError();
+      TheImage.StringData[Args.MakeArgString(Key)] =
+          Args.MakeArgString(*MetadataValueOrErr);
+    }
+
+    if (!TheImage.StringData.count(omp::offload::TripleKey))
+      return createStringError(Twine("override image '") + Arg +
+                               "' is missing a triple");
+
     TheImage.Image = std::move(*BufferOrErr);
 
     Images[Kind].emplace_back(std::move(TheImage));
   }
   return Error::success();
+}
+
+static void preserveInputMetadata(ArrayRef<OffloadFile> Input,
+                                  const InputArgList &Args,
+                                  OffloadingImage &Image) {
+  if (Input.empty())
+    return;
+
+  const OffloadBinary &FirstBinary = *Input.front().getBinary();
+  for (const auto &Entry : FirstBinary.strings()) {
+    StringRef Key = Entry.first;
+    if (Key == omp::offload::TripleKey || Key == omp::offload::ArchKey)
+      continue;
+
+    StringRef Value = Entry.second;
+    bool IsConsistent = llvm::all_of(Input, [&](const OffloadFile &File) {
+      return File.getBinary()->getString(Key) == Value;
+    });
+    if (!IsConsistent)
+      continue;
+
+    Image.StringData[Args.MakeArgString(Key)] = Args.MakeArgString(Value);
+  }
 }
 
 /// Transforms all the extracted offloading input files into an image that can
@@ -990,6 +1165,7 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
           reportError(createStringError(Err));
         });
     auto LinkerArgs = getLinkerArgs(Input, BaseArgs);
+    Triple DeviceTriple(LinkerArgs.getLastArgValue(OPT_triple_EQ));
 
     uint16_t ActiveOffloadKindMask = 0u;
     for (const auto &File : Input)
@@ -1032,19 +1208,61 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
           return createFileError(*OutputOrErr, EC);
       }
 
-      // Manually containerize offloading images not in ELF format.
-      if (Error E = containerizeRawImage(*FileOrErr, Kind, LinkerArgs))
-        return E;
+      std::optional<std::string> GeneratedMetalDescriptor;
+      StringRef DeviceArch = LinkerArgs.getLastArgValue(OPT_arch_EQ);
+      if (isMetalOpenMPTarget(DeviceTriple, DeviceArch, Kind)) {
+        auto DescriptorOrErr = createMetalDescriptor(Input);
+        if (!DescriptorOrErr)
+          return DescriptorOrErr.takeError();
+        GeneratedMetalDescriptor = std::move(*DescriptorOrErr);
+      }
+
+      auto FinalizedImageOrErr =
+          finalizeLinkedImage(*OutputOrErr, LinkerArgs, Kind);
+      if (!FinalizedImageOrErr)
+        return FinalizedImageOrErr.takeError();
+
+      if (FinalizedImageOrErr->Filename != *OutputOrErr) {
+        FileOrErr =
+            llvm::MemoryBuffer::getFileOrSTDIN(FinalizedImageOrErr->Filename);
+        if (std::error_code EC = FileOrErr.getError()) {
+          if (DryRun)
+            FileOrErr = MemoryBuffer::getMemBuffer("");
+          else
+            return createFileError(FinalizedImageOrErr->Filename, EC);
+        }
+      }
+
+      if (FinalizedImageOrErr->NeedsContainerization)
+        if (Error E = containerizeRawImage(*FileOrErr, Kind, LinkerArgs))
+          return E;
 
       std::scoped_lock<decltype(ImageMtx)> Guard(ImageMtx);
       OffloadingImage TheImage{};
-      TheImage.TheImageKind =
-          Args.hasArg(OPT_embed_bitcode) ? IMG_Bitcode : IMG_Object;
+      TheImage.TheImageKind = FinalizedImageOrErr->Kind;
       TheImage.TheOffloadKind = Kind;
-      TheImage.StringData["triple"] =
+      TheImage.StringData[omp::offload::TripleKey] =
           Args.MakeArgString(LinkerArgs.getLastArgValue(OPT_triple_EQ));
-      TheImage.StringData["arch"] =
+      TheImage.StringData[omp::offload::ArchKey] =
           Args.MakeArgString(LinkerArgs.getLastArgValue(OPT_arch_EQ));
+      preserveInputMetadata(Input, Args, TheImage);
+      if (GeneratedMetalDescriptor) {
+        auto Existing =
+            TheImage.StringData.find(omp::offload::MetalDescriptorKey);
+        if (Existing != TheImage.StringData.end() &&
+            Existing->second != *GeneratedMetalDescriptor)
+          return createStringError(
+              "conflicting 'metal.descriptor' metadata found while linking "
+              "Metal OpenMP device images");
+
+        TheImage.StringData[omp::offload::MetalDescriptorKey] =
+            Args.MakeArgString(*GeneratedMetalDescriptor);
+      } else if (isMetalOpenMPTarget(DeviceTriple, DeviceArch, Kind) &&
+                 !TheImage.StringData.count(omp::offload::MetalDescriptorKey)) {
+        return createStringError(
+            "Metal OpenMP offload requires structured kernel metadata; "
+            "rebuild device inputs with Apple Metal bitcode packaging");
+      }
       TheImage.Image = std::move(*FileOrErr);
 
       Images[Kind].emplace_back(std::move(TheImage));
@@ -1062,8 +1280,10 @@ linkAndWrapDeviceFiles(ArrayRef<SmallVector<OffloadFile>> LinkerInputFiles,
     // We sort the entries before bundling so they appear in a deterministic
     // order in the final binary.
     llvm::sort(Input, [](OffloadingImage &A, OffloadingImage &B) {
-      return A.StringData["triple"] > B.StringData["triple"] ||
-             A.StringData["arch"] > B.StringData["arch"] ||
+      return A.StringData[omp::offload::TripleKey] >
+                 B.StringData[omp::offload::TripleKey] ||
+             A.StringData[omp::offload::ArchKey] >
+                 B.StringData[omp::offload::ArchKey] ||
              A.TheOffloadKind < B.TheOffloadKind;
     });
     auto BundledImagesOrErr = bundleLinkedOutput(Input, Args, Kind);
@@ -1125,6 +1345,12 @@ searchLibraryBaseName(StringRef Name, StringRef Root,
                       ArrayRef<StringRef> SearchPaths) {
   for (StringRef Dir : SearchPaths) {
     if (std::optional<std::string> File =
+            findFile(Dir, Root, "lib" + Name + ".dylib"))
+      return File;
+    if (std::optional<std::string> File =
+            findFile(Dir, Root, "lib" + Name + ".tbd"))
+      return File;
+    if (std::optional<std::string> File =
             findFile(Dir, Root, "lib" + Name + ".so"))
       return File;
     if (std::optional<std::string> File =
@@ -1156,9 +1382,15 @@ getDeviceInput(const ArgList &Args) {
     return SmallVector<SmallVector<OffloadFile>>();
 
   StringRef Root = Args.getLastArgValue(OPT_sysroot_EQ);
+  if (Root.empty())
+    Root = Args.getLastArgValue(OPT_syslibroot);
   SmallVector<StringRef> LibraryPaths;
   for (const opt::Arg *Arg : Args.filtered(OPT_library_path, OPT_libpath))
     LibraryPaths.push_back(Arg->getValue());
+  if (!Root.empty()) {
+    LibraryPaths.push_back(Args.MakeArgString("=usr/lib"));
+    LibraryPaths.push_back(Args.MakeArgString("=usr/local/lib"));
+  }
 
   BumpPtrAllocator Alloc;
   StringSaver Saver(Alloc);
@@ -1179,10 +1411,6 @@ getDeviceInput(const ArgList &Args) {
         Arg->getOption().matches(OPT_library)
             ? searchLibrary(Arg->getValue(), Root, LibraryPaths)
             : std::string(Arg->getValue());
-
-    if (!Filename && Arg->getOption().matches(OPT_library))
-      reportError(
-          createStringError("unable to find library -l%s", Arg->getValue()));
 
     if (!Filename || !sys::fs::exists(*Filename) ||
         sys::fs::is_directory(*Filename))
