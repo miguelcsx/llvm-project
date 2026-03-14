@@ -43,7 +43,7 @@ only for the linker wrapper will be forwarded to the wrapped linker job.
     -l <libname>           Search for library <libname>
     --opt-level=<O0, O1, O2, or O3>
                            Optimization level for LTO
-    --override-image=<kind=file>
+    --override-image=<kind=file[,key=value...]>
                             Uses the provided file as if it were the output of the device link step
     -o <path>              Path to file to write output
     --pass-remarks-analysis=<value>
@@ -111,7 +111,7 @@ can then be modified.
 Doing this will allow you to override one of the input files by replacing its
 embedded offloading metadata with a user-modified version. However, this will be
 more difficult when there are multiple input files. For a very large hammer, the
-``--override-image=<kind>=<file>`` flag can be used.
+``--override-image=<kind>=<file>[,<key>=<value>...]`` flag can be used.
 
 In the following example, we use the ``--save-temps`` to obtain the LLVM-IR just
 before running the backend. We then modify it to test altered behavior, and then
@@ -125,6 +125,16 @@ result of the device linking phase.
   $> ; Modify temp files.
   $> clang --target=amdgcn-amd-amdhsa -mcpu=gfx90a -nogpulib out.bc -o a.out
   $> clang openmp.c -fopenmp --offload-arch=gfx90a -Wl,--override-image=openmp=a.out
+
+Additional metadata can be supplied inline when the replacement image is not a
+native object file and the wrapper cannot infer target properties from it. This
+is primarily useful for raw container formats such as ``.metallib``.
+
+.. code-block:: sh
+
+  $> clang-linker-wrapper --emit-fatbin-only \
+  ...   --override-image=openmp=kernel.metallib,triple=arm64-apple-macosx15.0,arch=applegpu \
+  ...   -o kernel.out
 
 Example
 =======
