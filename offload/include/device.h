@@ -40,6 +40,7 @@ using GenericPluginTy = llvm::omp::target::plugin::GenericPluginTy;
 
 // Forward declarations.
 struct __tgt_bin_desc;
+class DeviceImageTy;
 struct __tgt_target_table;
 
 struct DeviceTy {
@@ -60,7 +61,7 @@ struct DeviceTy {
   /// Provide access to the mapping handler.
   MappingInfoTy &getMappingInfo() { return MappingInfo; }
 
-  llvm::Expected<__tgt_device_binary> loadBinary(__tgt_device_image *Img);
+  llvm::Expected<__tgt_device_binary> loadBinary(::DeviceImageTy &Image);
 
   // device memory allocation/deallocation routines
   /// Allocates \p Size bytes on the device, host or shared memory space

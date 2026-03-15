@@ -22,6 +22,7 @@
 
 #include "device.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator.h"
@@ -60,10 +61,21 @@ struct PluginManager {
   // Unregister a shared library from all RTLs.
   void unregisterLib(__tgt_bin_desc *Desc);
 
-  void addDeviceImage(__tgt_bin_desc &TgtBinDesc,
-                      __tgt_device_image &TgtDeviceImage) {
+  DeviceImageTy &addDeviceImage(__tgt_bin_desc &TgtBinDesc,
+                                __tgt_device_image &TgtDeviceImage) {
     DeviceImages.emplace_back(
         std::make_unique<DeviceImageTy>(TgtBinDesc, TgtDeviceImage));
+    DeviceImageTy &DeviceImage = *DeviceImages.back();
+    DeviceImagesByExecutableImage[&DeviceImage.getExecutableImage()] =
+        &DeviceImage;
+    return DeviceImage;
+  }
+
+  DeviceImageTy *getDeviceImage(__tgt_device_image &TgtDeviceImage) const {
+    auto It = DeviceImagesByExecutableImage.find(&TgtDeviceImage);
+    if (It == DeviceImagesByExecutableImage.end())
+      return nullptr;
+    return It->second;
   }
 
   /// Return the device presented to the user as device \p DeviceNo if it is
@@ -167,6 +179,8 @@ private:
   /// Executable images and information extracted from the input images passed
   /// to the runtime.
   llvm::SmallVector<std::unique_ptr<DeviceImageTy>> DeviceImages;
+  llvm::DenseMap<const __tgt_device_image *, DeviceImageTy *>
+      DeviceImagesByExecutableImage;
 
   /// The user provided requirements.
   RequirementCollection Requirements;
@@ -192,4 +206,4 @@ void deinitRuntime();
 extern PluginManager *PM;
 extern std::atomic<bool> RTLAlive; // Indicates if the RTL has been initialized
 extern std::atomic<int> RTLOngoingSyncs; // Counts ongoing external syncs
-#endif // OMPTARGET_PLUGIN_MANAGER_H
+#endif                                   // OMPTARGET_PLUGIN_MANAGER_H

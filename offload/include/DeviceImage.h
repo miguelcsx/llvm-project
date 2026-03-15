@@ -34,7 +34,43 @@ public:
   DeviceImageTy(__tgt_bin_desc &BinaryDesc, __tgt_device_image &Image);
 
   __tgt_device_image &getExecutableImage() { return Image; }
+  const __tgt_device_image &getExecutableImage() const { return Image; }
   __tgt_bin_desc &getBinaryDesc() { return *BinaryDesc; }
+  const __tgt_bin_desc &getBinaryDesc() const { return *BinaryDesc; }
+
+  bool hasOffloadBinary() const { return Binary != nullptr; }
+
+  const llvm::object::OffloadBinary *getOffloadBinary() const {
+    return Binary.get();
+  }
+
+  llvm::object::ImageKind getImageKind() const {
+    return Binary ? Binary->getImageKind() : llvm::object::IMG_None;
+  }
+
+  llvm::object::OffloadKind getOffloadKind() const {
+    return Binary ? Binary->getOffloadKind() : llvm::object::OFK_None;
+  }
+
+  llvm::StringRef getTriple() const {
+    return Binary ? Binary->getTriple() : llvm::StringRef();
+  }
+
+  llvm::StringRef getArch() const {
+    return Binary ? Binary->getArch() : llvm::StringRef();
+  }
+
+  llvm::StringRef getString(llvm::StringRef Key) const {
+    return Binary ? Binary->getString(Key) : llvm::StringRef();
+  }
+
+  llvm::StringRef getExecutableBinary() const {
+    if (!Image.ImageStart || !Image.ImageEnd)
+      return llvm::StringRef();
+    auto *Begin = reinterpret_cast<const char *>(Image.ImageStart);
+    auto *End = reinterpret_cast<const char *>(Image.ImageEnd);
+    return llvm::StringRef(Begin, End - Begin);
+  }
 
   auto entries() {
     return llvm::make_range(Image.EntriesBegin, Image.EntriesEnd);

@@ -187,12 +187,14 @@ setupIndirectCallTable(DeviceTy &Device, __tgt_device_image *Image,
 
 // Load binary to device and perform global initialization if needed.
 llvm::Expected<__tgt_device_binary>
-DeviceTy::loadBinary(__tgt_device_image *Img) {
+DeviceTy::loadBinary(::DeviceImageTy &Image) {
   __tgt_device_binary Binary;
+  __tgt_device_image &Img = Image.getExecutableImage();
 
-  if (RTL->load_binary(RTLDeviceID, Img, &Binary) != OFFLOAD_SUCCESS)
+  if (RTL->load_binary(RTLDeviceID, Image.getExecutableBinary(),
+                       Image.getOffloadBinary(), &Binary) != OFFLOAD_SUCCESS)
     return error::createOffloadError(error::ErrorCode::INVALID_BINARY,
-                                     "failed to load binary %p", Img);
+                                     "failed to load binary %p", &Img);
 
   // This symbol is optional.
   void *DeviceEnvironmentPtr;
@@ -201,7 +203,7 @@ DeviceTy::loadBinary(__tgt_device_image *Img) {
     return Binary;
 
   // Obtain a table mapping host function pointers to device function pointers.
-  auto CallTablePairOrErr = setupIndirectCallTable(*this, Img, Binary);
+  auto CallTablePairOrErr = setupIndirectCallTable(*this, &Img, Binary);
   if (!CallTablePairOrErr)
     return CallTablePairOrErr.takeError();
 

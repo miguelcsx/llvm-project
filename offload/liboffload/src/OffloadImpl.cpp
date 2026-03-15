@@ -262,6 +262,8 @@ constexpr ol_platform_backend_t pluginNameToBackend(StringRef Name) {
     return OL_PLATFORM_BACKEND_AMDGPU;
   } else if (Name == "cuda") {
     return OL_PLATFORM_BACKEND_CUDA;
+  } else if (Name == "metal") {
+    return OL_PLATFORM_BACKEND_METAL;
   } else if (Name == "host") {
     return OL_PLATFORM_BACKEND_HOST;
   } else if (Name == "level_zero") {

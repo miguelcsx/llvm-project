@@ -21,13 +21,18 @@ extern void llvm::omp::target::ompt::connectLibrary();
 #endif
 using namespace llvm::omp::target::debug;
 
-static std::mutex PluginMtx;
 static uint32_t RefCount = 0;
 std::atomic<bool> RTLAlive{false};
 std::atomic<int> RTLOngoingSyncs{0};
 
+static std::mutex &getPluginMutex() {
+  static std::mutex PluginMtx;
+  return PluginMtx;
+}
+
 void initRuntime() {
-  std::scoped_lock<decltype(PluginMtx)> Lock(PluginMtx);
+  std::mutex &PluginMtx = getPluginMutex();
+  std::scoped_lock<std::mutex> Lock(PluginMtx);
   Profiler::get();
   TIMESCOPE();
 
@@ -51,7 +56,8 @@ void initRuntime() {
 }
 
 void deinitRuntime() {
-  std::scoped_lock<decltype(PluginMtx)> Lock(PluginMtx);
+  std::mutex &PluginMtx = getPluginMutex();
+  std::scoped_lock<std::mutex> Lock(PluginMtx);
   assert(PM && "Runtime not initialized");
 
   if (RefCount == 1) {

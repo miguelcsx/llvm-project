@@ -207,24 +207,26 @@ void PluginManager::registerLib(__tgt_bin_desc *Desc) {
       PM->addRequirements(Entry.Data);
 
   // Extract the executable image and extra information if available.
+  SmallVector<DeviceImageTy *, 4> RegisteredImages;
   for (int32_t i = 0; i < Desc->NumDeviceImages; ++i)
-    PM->addDeviceImage(*Desc, Desc->DeviceImages[i]);
+    RegisteredImages.push_back(
+        &PM->addDeviceImage(*Desc, Desc->DeviceImages[i]));
 
   // Register the images with the RTLs that understand them, if any.
   llvm::DenseMap<GenericPluginTy *, llvm::DenseSet<int32_t>> UsedDevices;
   for (int32_t i = 0; i < Desc->NumDeviceImages; ++i) {
     // Obtain the image and information that was previously extracted.
-    __tgt_device_image *Img = &Desc->DeviceImages[i];
+    DeviceImageTy &ImageInfo = *RegisteredImages[i];
+    __tgt_device_image *Img = &ImageInfo.getExecutableImage();
+    StringRef Buffer = ImageInfo.getExecutableBinary();
+    const object::OffloadBinary *ParsedBinary = ImageInfo.getOffloadBinary();
 
     GenericPluginTy *FoundRTL = nullptr;
 
     // Scan the RTLs that have associated images until we find one that supports
     // the current image.
     for (auto &R : plugins()) {
-      StringRef Buffer(reinterpret_cast<const char *>(Img->ImageStart),
-                       utils::getPtrDiff(Img->ImageEnd, Img->ImageStart));
-
-      if (!R.isPluginCompatible(Buffer))
+      if (!R.isPluginCompatible(Buffer, ParsedBinary))
         continue;
 
       if (!initializePlugin(R))
@@ -248,7 +250,7 @@ void PluginManager::registerLib(__tgt_bin_desc *Desc) {
           continue;
         }
 
-        if (!R.isDeviceCompatible(DeviceId, Buffer))
+        if (!R.isDeviceCompatible(DeviceId, Buffer, ParsedBinary))
           continue;
 
         ODBG(ODT_Init) << "Image " << Img->ImageStart
@@ -422,7 +424,14 @@ static int loadImagesOntoDevice(DeviceTy &Device) {
       }
 
       // 2) Load the image onto the given device.
-      auto BinaryOrErr = Device.loadBinary(Img);
+      DeviceImageTy *DeviceImage = PM->getDeviceImage(*Img);
+      if (!DeviceImage) {
+        REPORT() << "No parsed offload image found for device image " << Img;
+        Rc = OFFLOAD_FAIL;
+        break;
+      }
+
+      auto BinaryOrErr = Device.loadBinary(*DeviceImage);
       if (llvm::Error Err = BinaryOrErr.takeError()) {
         REPORT() << "Failed to load image " << llvm::toString(std::move(Err));
         Rc = OFFLOAD_FAIL;
