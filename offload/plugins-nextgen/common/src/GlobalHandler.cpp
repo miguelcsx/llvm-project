@@ -17,6 +17,7 @@
 #include "Shared/Utils.h"
 
 #include "llvm/ProfileData/InstrProfData.inc"
+#include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/Error.h"
 
 #include <cstring>
@@ -31,8 +32,9 @@ using namespace llvm::offload::debug;
 
 Expected<std::unique_ptr<ObjectFile>>
 GenericGlobalHandlerTy::getELFObjectFile(DeviceImageTy &Image) {
-  assert(utils::elf::isELF(Image.getMemoryBuffer().getBuffer()) &&
-         "Input is not an ELF file");
+  if (!utils::elf::isELF(Image.getMemoryBuffer().getBuffer()))
+    return Plugin::error(ErrorCode::INVALID_BINARY,
+                         "input image is not an ELF file");
 
   auto Expected =
       ELFObjectFileBase::createELFObjectFile(Image.getMemoryBuffer());
@@ -280,7 +282,10 @@ void GPUProfGlobals::dump() const {
 }
 
 Error GPUProfGlobals::write() const {
-  if (!__llvm_write_custom_profile)
+  auto *WriteCustomProfile = reinterpret_cast<WriteCustomProfileTy>(
+      sys::DynamicLibrary::SearchForAddressOfSymbol(
+          "__llvm_write_custom_profile"));
+  if (!WriteCustomProfile)
     return Plugin::error(ErrorCode::INVALID_BINARY,
                          "could not find symbol __llvm_write_custom_profile. "
                          "The compiler-rt profiling library must be linked for "
@@ -311,9 +316,9 @@ Error GPUProfGlobals::write() const {
   memcpy(NamesBegin, NamesData.data(), NamesData.size());
 
   // Invoke compiler-rt entrypoint
-  int result = __llvm_write_custom_profile(
-      TargetTriple.str().c_str(), DataBegin, DataEnd, CountersBegin,
-      CountersEnd, NamesBegin, NamesEnd, &Version);
+  int result = WriteCustomProfile(TargetTriple.str().c_str(), DataBegin,
+                                  DataEnd, CountersBegin, CountersEnd,
+                                  NamesBegin, NamesEnd, &Version);
   if (result != 0)
     return Plugin::error(ErrorCode::HOST_IO,
                          "error writing GPU PGO data to file");

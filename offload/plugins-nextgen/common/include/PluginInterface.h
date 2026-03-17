@@ -17,6 +17,7 @@
 #include <list>
 #include <map>
 #include <shared_mutex>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -41,8 +42,10 @@
 #endif
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Frontend/OpenMP/OMPConstants.h"
 #include "llvm/Frontend/OpenMP/OMPGridValues.h"
+#include "llvm/Object/OffloadBinary.h"
 #include "llvm/Support/Allocator.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -111,6 +114,9 @@ struct AsyncInfoWrapperTy {
 
   /// Get the raw __tgt_async_info pointer.
   operator __tgt_async_info *() const { return AsyncInfoPtr; }
+
+  /// Return whether this wrapper is using the internal synchronous async info.
+  bool usesLocalAsyncInfo() const { return AsyncInfoPtr == &LocalAsyncInfo; }
 
   /// Indicate whether there is queue.
   bool hasQueue() const { return (AsyncInfoPtr->Queue != nullptr); }
@@ -315,6 +321,16 @@ class DeviceImageTy {
   /// Reference to the device this image is loaded on.
   GenericDeviceTy &Device;
 
+  /// Parsed metadata from the offload image container, if available.
+  bool HasBinaryDesc = false;
+  object::ImageKind ImageKind = object::IMG_None;
+  object::OffloadKind OffloadKind = object::OFK_None;
+  uint32_t BinaryVersion = 0;
+  uint32_t BinaryFlags = 0;
+  std::string Triple;
+  std::string Arch;
+  StringMap<std::string> MetadataStrings;
+
 public:
   virtual ~DeviceImageTy() = default;
 
@@ -338,6 +354,33 @@ public:
   MemoryBufferRef getMemoryBuffer() const {
     return MemoryBufferRef(StringRef((const char *)getStart(), getSize()),
                            "Image");
+  }
+
+  void setBinaryDesc(const object::OffloadBinary &Binary) {
+    HasBinaryDesc = true;
+    ImageKind = Binary.getImageKind();
+    OffloadKind = Binary.getOffloadKind();
+    BinaryVersion = Binary.getVersion();
+    BinaryFlags = Binary.getFlags();
+    Triple = Binary.getTriple().str();
+    Arch = Binary.getArch().str();
+    MetadataStrings.clear();
+    for (const auto &StringEntry : Binary.strings())
+      MetadataStrings[StringEntry.first] = StringEntry.second.str();
+  }
+
+  bool hasBinaryDesc() const { return HasBinaryDesc; }
+  object::ImageKind getImageKind() const { return ImageKind; }
+  object::OffloadKind getOffloadKind() const { return OffloadKind; }
+  uint32_t getBinaryVersion() const { return BinaryVersion; }
+  uint32_t getBinaryFlags() const { return BinaryFlags; }
+  StringRef getTriple() const { return Triple; }
+  StringRef getArch() const { return Arch; }
+  StringRef getString(StringRef Key) const {
+    auto It = MetadataStrings.find(Key);
+    if (It == MetadataStrings.end())
+      return {};
+    return It->second;
   }
 };
 
@@ -778,8 +821,9 @@ struct GenericDeviceTy : public DeviceAllocatorTy {
   virtual Error deinitImpl() = 0;
 
   /// Load the binary image into the device and return the target table.
-  Expected<DeviceImageTy *> loadBinary(GenericPluginTy &Plugin,
-                                       StringRef TgtImage);
+  Expected<DeviceImageTy *>
+  loadBinary(GenericPluginTy &Plugin, StringRef TgtImage,
+             const object::OffloadBinary *BinaryDesc = nullptr);
   virtual Expected<DeviceImageTy *>
   loadBinaryImpl(std::unique_ptr<MemoryBuffer> &&TgtImage, int32_t ImageId) = 0;
 
@@ -1351,18 +1395,35 @@ struct GenericPluginTy {
   }
 
   /// Top level interface to verify if a given ELF image can be executed on a
-  /// given target. Returns true if the \p Image is compatible with the plugin.
+  /// given target.
   Expected<bool> checkELFImage(StringRef Image) const;
 
   /// Return true if the \p Image can be compiled to run on the platform's
   /// target architecture.
   Expected<bool> checkBitcodeImage(StringRef Image) const;
 
+  /// Indicate if a non-ELF and non-bitcode image is compatible with the
+  /// plugin. Backends can override this to support additional packaged image
+  /// formats without changing the common registration flow.
+  virtual Expected<bool>
+  isImageCompatible(StringRef Image,
+                    const object::OffloadBinary &Binary) const {
+    return false;
+  }
+
   /// Indicate if an image is compatible with the plugin devices. Notice that
   /// this function may be called before actually initializing the devices. So
   /// we could not move this function into GenericDeviceTy.
   virtual Expected<bool> isELFCompatible(uint32_t DeviceID,
                                          StringRef Image) const = 0;
+
+  /// Indicate if a non-ELF and non-bitcode image is compatible with the
+  /// specific device.
+  virtual Expected<bool>
+  isDeviceImageCompatible(uint32_t DeviceID, StringRef Image,
+                          const object::OffloadBinary &Binary) const {
+    return isImageCompatible(Image, Binary);
+  }
 
   virtual Error flushQueueImpl(omp_interop_val_t *Interop) {
     return Plugin::success();
@@ -1392,10 +1453,12 @@ public:
 
   /// Returns non-zero if the \p Image is compatible with the plugin. This
   /// function does not require the plugin to be initialized before use.
-  int32_t isPluginCompatible(StringRef Image);
+  int32_t isPluginCompatible(StringRef Image,
+                             const object::OffloadBinary *BinaryDesc = nullptr);
 
   /// Returns non-zero if the \p Image is compatible with the device.
-  int32_t isDeviceCompatible(int32_t DeviceId, StringRef Image);
+  int32_t isDeviceCompatible(int32_t DeviceId, StringRef Image,
+                             const object::OffloadBinary *BinaryDesc = nullptr);
 
   /// Returns non-zero if the plugin device has been initialized.
   int32_t is_device_initialized(int32_t DeviceId) const;
@@ -1415,7 +1478,8 @@ public:
                                    uint64_t &ReqPtrArgOffset);
 
   /// Loads the associated binary into the plugin and returns a handle to it.
-  int32_t load_binary(int32_t DeviceId, __tgt_device_image *TgtImage,
+  int32_t load_binary(int32_t DeviceId, StringRef Image,
+                      const object::OffloadBinary *BinaryDesc,
                       __tgt_device_binary *Binary);
 
   /// Allocates memory that is accessively to the given device.

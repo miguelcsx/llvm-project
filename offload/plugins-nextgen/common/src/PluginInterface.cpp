@@ -405,7 +405,8 @@ Error GenericKernelTy::init(GenericDeviceTy &GenericDevice,
   // Retrieve kernel environment object for the kernel.
   std::string EnvironmentName = std::string(Name) + "_kernel_environment";
   GenericGlobalHandlerTy &GHandler = GenericDevice.Plugin.getGlobalHandler();
-  if (GHandler.isSymbolInImage(GenericDevice, Image, EnvironmentName)) {
+  if (utils::elf::isELF(Image.getMemoryBuffer().getBuffer()) &&
+      GHandler.isSymbolInImage(GenericDevice, Image, EnvironmentName)) {
     GlobalTy KernelEnv(EnvironmentName, sizeof(KernelEnvironment),
                        &KernelEnvironment);
     if (auto Err =
@@ -823,20 +824,22 @@ Error GenericDeviceTy::unloadBinary(DeviceImageTy *Image) {
   if (auto Err = callGlobalDestructors(Plugin, *Image))
     return Err;
 
-  GenericGlobalHandlerTy &Handler = Plugin.getGlobalHandler();
-  auto ProfOrErr = Handler.readProfilingGlobals(*this, *Image);
-  if (!ProfOrErr)
-    return ProfOrErr.takeError();
+  if (utils::elf::isELF(Image->getMemoryBuffer().getBuffer())) {
+    GenericGlobalHandlerTy &Handler = Plugin.getGlobalHandler();
+    auto ProfOrErr = Handler.readProfilingGlobals(*this, *Image);
+    if (!ProfOrErr)
+      return ProfOrErr.takeError();
 
-  if (!ProfOrErr->empty()) {
-    // Dump out profdata
-    if ((OMPX_DebugKind.get() & uint32_t(DeviceDebugKind::PGODump)) ==
-        uint32_t(DeviceDebugKind::PGODump))
-      ProfOrErr->dump();
+    if (!ProfOrErr->empty()) {
+      // Dump out profdata
+      if ((OMPX_DebugKind.get() & uint32_t(DeviceDebugKind::PGODump)) ==
+          uint32_t(DeviceDebugKind::PGODump))
+        ProfOrErr->dump();
 
-    // Write data to profiling file
-    if (auto Err = ProfOrErr->write())
-      return Err;
+      // Write data to profiling file
+      if (auto Err = ProfOrErr->write())
+        return Err;
+    }
   }
 
   return unloadBinaryImpl(Image);
@@ -873,13 +876,17 @@ Error GenericDeviceTy::deinit(GenericPluginTy &Plugin) {
 
   return deinitImpl();
 }
-Expected<DeviceImageTy *> GenericDeviceTy::loadBinary(GenericPluginTy &Plugin,
-                                                      StringRef InputTgtImage) {
+Expected<DeviceImageTy *>
+GenericDeviceTy::loadBinary(GenericPluginTy &Plugin, StringRef InputTgtImage,
+                            const object::OffloadBinary *BinaryDesc) {
   ODBG(OLDT_Init) << "Load data from image "
                   << static_cast<const void *>(InputTgtImage.bytes_begin());
 
   std::unique_ptr<MemoryBuffer> Buffer;
-  if (identify_magic(InputTgtImage) == file_magic::bitcode) {
+  bool IsBitcode = BinaryDesc
+                       ? BinaryDesc->getImageKind() == object::IMG_Bitcode
+                       : identify_magic(InputTgtImage) == file_magic::bitcode;
+  if (IsBitcode) {
     auto CompiledImageOrErr = Plugin.getJIT().process(InputTgtImage, *this);
     if (!CompiledImageOrErr) {
       return Plugin::error(ErrorCode::COMPILE_FAILURE,
@@ -897,6 +904,8 @@ Expected<DeviceImageTy *> GenericDeviceTy::loadBinary(GenericPluginTy &Plugin,
   if (!ImageOrErr)
     return ImageOrErr.takeError();
   DeviceImageTy *Image = *ImageOrErr;
+  if (BinaryDesc)
+    Image->setBinaryDesc(*BinaryDesc);
 
   // Add the image to list.
   LoadedImages.push_back(Image);
@@ -1626,7 +1635,9 @@ Expected<bool> GenericPluginTy::checkBitcodeImage(StringRef Image) const {
 
 int32_t GenericPluginTy::is_initialized() const { return Initialized; }
 
-int32_t GenericPluginTy::isPluginCompatible(StringRef Image) {
+int32_t
+GenericPluginTy::isPluginCompatible(StringRef Image,
+                                    const object::OffloadBinary *BinaryDesc) {
   auto HandleError = [&](Error Err) -> bool {
     std::string ErrStr = toString(std::move(Err));
     ODBG(OLDT_Init) << "Failure to check validity of image "
@@ -1634,6 +1645,14 @@ int32_t GenericPluginTy::isPluginCompatible(StringRef Image) {
                     << ErrStr;
     return false;
   };
+
+  if (BinaryDesc && BinaryDesc->getImageKind() == object::IMG_Bitcode) {
+    auto MatchOrErr = checkBitcodeImage(Image);
+    if (Error Err = MatchOrErr.takeError())
+      return HandleError(std::move(Err));
+    return *MatchOrErr;
+  }
+
   switch (identify_magic(Image)) {
   case file_magic::elf:
   case file_magic::elf_relocatable:
@@ -1652,11 +1671,19 @@ int32_t GenericPluginTy::isPluginCompatible(StringRef Image) {
     return *MatchOrErr;
   }
   default:
-    return false;
+    if (!BinaryDesc)
+      return false;
+
+    auto CompatibleOrErr = isImageCompatible(Image, *BinaryDesc);
+    if (Error Err = CompatibleOrErr.takeError())
+      return HandleError(std::move(Err));
+    return *CompatibleOrErr;
   }
 }
 
-int32_t GenericPluginTy::isDeviceCompatible(int32_t DeviceId, StringRef Image) {
+int32_t
+GenericPluginTy::isDeviceCompatible(int32_t DeviceId, StringRef Image,
+                                    const object::OffloadBinary *BinaryDesc) {
   auto HandleError = [&](Error Err) -> bool {
     std::string ErrStr = toString(std::move(Err));
     ODBG(OLDT_Init) << "Failure to check validity of image "
@@ -1664,6 +1691,14 @@ int32_t GenericPluginTy::isDeviceCompatible(int32_t DeviceId, StringRef Image) {
                     << ErrStr;
     return false;
   };
+
+  if (BinaryDesc && BinaryDesc->getImageKind() == object::IMG_Bitcode) {
+    auto MatchOrErr = checkBitcodeImage(Image);
+    if (Error Err = MatchOrErr.takeError())
+      return HandleError(std::move(Err));
+    return *MatchOrErr;
+  }
+
   switch (identify_magic(Image)) {
   case file_magic::elf:
   case file_magic::elf_relocatable:
@@ -1689,7 +1724,14 @@ int32_t GenericPluginTy::isDeviceCompatible(int32_t DeviceId, StringRef Image) {
     return *MatchOrErr;
   }
   default:
-    return false;
+    if (!BinaryDesc)
+      return false;
+
+    auto CompatibleOrErr =
+        isDeviceImageCompatible(DeviceId, Image, *BinaryDesc);
+    if (Error Err = CompatibleOrErr.takeError())
+      return HandleError(std::move(Err));
+    return *CompatibleOrErr;
   }
 }
 
@@ -1738,17 +1780,16 @@ int32_t GenericPluginTy::initialize_record_replay(int32_t DeviceId,
   return OFFLOAD_SUCCESS;
 }
 
-int32_t GenericPluginTy::load_binary(int32_t DeviceId,
-                                     __tgt_device_image *TgtImage,
+int32_t GenericPluginTy::load_binary(int32_t DeviceId, StringRef BinaryImage,
+                                     const object::OffloadBinary *BinaryDesc,
                                      __tgt_device_binary *Binary) {
   GenericDeviceTy &Device = getDevice(DeviceId);
 
-  StringRef Buffer(reinterpret_cast<const char *>(TgtImage->ImageStart),
-                   utils::getPtrDiff(TgtImage->ImageEnd, TgtImage->ImageStart));
-  auto ImageOrErr = Device.loadBinary(*this, Buffer);
+  auto ImageOrErr = Device.loadBinary(*this, BinaryImage, BinaryDesc);
   if (!ImageOrErr) {
     auto Err = ImageOrErr.takeError();
-    REPORT() << "Failure to load binary image " << TgtImage << " on device "
+    REPORT() << "Failure to load binary image "
+             << static_cast<const void *>(BinaryImage.data()) << " on device "
              << DeviceId << ": " << toString(std::move(Err));
     return OFFLOAD_FAIL;
   }
