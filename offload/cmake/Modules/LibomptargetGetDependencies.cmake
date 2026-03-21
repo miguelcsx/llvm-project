@@ -123,3 +123,16 @@ if(LIBOMPTARGET_OFFLOAD_ARCH)
 endif()
 
 set(OPENMP_PTHREAD_LIB ${LLVM_PTHREAD_LIB})
+
+################################################################################
+# Looking for Metal
+################################################################################
+
+find_library(LIBOMPTARGET_DEP_METAL_FRAMEWORK NAMES Metal)
+find_library(LIBOMPTARGET_DEP_FOUNDATION_FRAMEWORK NAMES Foundation)
+
+if(LIBOMPTARGET_DEP_METAL_FRAMEWORK AND LIBOMPTARGET_DEP_FOUNDATION_FRAMEWORK)
+  set(LIBOMPTARGET_DEP_METAL_FOUND TRUE)
+else()
+  set(LIBOMPTARGET_DEP_METAL_FOUND FALSE)
+endif()

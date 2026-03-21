@@ -13,9 +13,19 @@ else()
 endif()
 
 # Check that the library can actually be built.
-if(APPLE OR WIN32 OR WASM)
-  message(WARNING "libomptarget cannot be built on Windows and MacOS X!")
+option(LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT
+  "Enable experimental libomptarget builds on Apple hosts."
+  OFF)
+
+if(WIN32 OR WASM)
+  message(WARNING "libomptarget cannot be built on Windows or WebAssembly hosts")
   return()
+elseif(APPLE AND NOT LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT)
+  message(WARNING "libomptarget on Apple hosts is experimental; set "
+                  "LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT=ON to enable it")
+  return()
+elseif(APPLE)
+  message(STATUS "Building libomptarget with experimental Apple support")
 elseif("${LLVM_DEFAULT_TARGET_TRIPLE}" MATCHES "^(amdgcn|nvptx|spirv)" OR
        "${CMAKE_CXX_COMPILER_TARGET}" MATCHES "^(amdgcn|nvptx|spirv)")
   message(WARNING "offload cannot be built on GPU targets yet.")
@@ -155,8 +165,11 @@ if(DEFINED LIBOMPTARGET_BUILD_CUDA_PLUGIN OR
 endif()
 
 set(LIBOMPTARGET_ALL_PLUGIN_TARGETS amdgpu cuda)
+if(APPLE AND LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT)
+  list(APPEND LIBOMPTARGET_ALL_PLUGIN_TARGETS metal)
+endif()
 set(LIBOMPTARGET_PLUGINS_TO_BUILD "all" CACHE STRING
-    "Semicolon-separated list of plugins to use: cuda, amdgpu, level_zero, or \"all\".")
+    "Semicolon-separated list of plugins to use: cuda, amdgpu, level_zero, metal, or \"all\".")
 
 if(LIBOMPTARGET_PLUGINS_TO_BUILD STREQUAL "all")
   set(LIBOMPTARGET_PLUGINS_TO_BUILD ${LIBOMPTARGET_ALL_PLUGIN_TARGETS})
@@ -192,6 +205,22 @@ endif()
 if("level_zero" IN_LIST LIBOMPTARGET_PLUGINS_TO_BUILD AND
    NOT LIBOMPTARGET_DEP_LEVEL_ZERO_FOUND)
   list(REMOVE_ITEM LIBOMPTARGET_PLUGINS_TO_BUILD "level_zero")
+endif()
+if(APPLE)
+  foreach(plugin IN ITEMS amdgpu cuda level_zero)
+    if("${plugin}" IN_LIST LIBOMPTARGET_PLUGINS_TO_BUILD)
+      message(STATUS "Not building ${plugin} plugin on Apple hosts")
+      list(REMOVE_ITEM LIBOMPTARGET_PLUGINS_TO_BUILD "${plugin}")
+    endif()
+  endforeach()
+  if("metal" IN_LIST LIBOMPTARGET_PLUGINS_TO_BUILD AND
+     NOT LIBOMPTARGET_DEP_METAL_FOUND)
+    message(STATUS "Not building Metal plugin: Metal/Foundation frameworks not found")
+    list(REMOVE_ITEM LIBOMPTARGET_PLUGINS_TO_BUILD "metal")
+  endif()
+elseif("metal" IN_LIST LIBOMPTARGET_PLUGINS_TO_BUILD)
+  message(STATUS "Not building Metal plugin: only supported on Apple hosts")
+  list(REMOVE_ITEM LIBOMPTARGET_PLUGINS_TO_BUILD "metal")
 endif()
 message(STATUS "Building the offload library with support for "
                "the \"${LIBOMPTARGET_PLUGINS_TO_BUILD}\" plugins")
