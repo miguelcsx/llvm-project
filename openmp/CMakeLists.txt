@@ -105,12 +105,15 @@ set(OPENMP_TEST_OPENMP_FLAGS ${OPENMP_TEST_COMPILER_OPENMP_FLAGS} CACHE STRING
   "OpenMP compiler flag to use for testing OpenMP runtime libraries.")
 
 set(ENABLE_LIBOMPTARGET ON)
-# Currently libomptarget cannot be compiled on Windows or MacOS X.
-# Since the device plugins are only supported on Linux anyway,
-# there is no point in trying to compile libomptarget on other OSes.
-# 32-bit systems are not supported either.
-if (APPLE OR WIN32 OR WASM OR NOT "cxx_std_17" IN_LIST CMAKE_CXX_COMPILE_FEATURES
+option(LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT
+  "Enable experimental libomptarget builds on Apple hosts."
+  OFF)
+# libomptarget is supported on Linux today. Apple builds remain experimental
+# and must be requested explicitly. 32-bit systems are not supported.
+if (WIN32 OR WASM OR NOT "cxx_std_17" IN_LIST CMAKE_CXX_COMPILE_FEATURES
     OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR "${CMAKE_SYSTEM_NAME}" MATCHES "AIX")
+  set(ENABLE_LIBOMPTARGET OFF)
+elseif (APPLE AND NOT LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT)
   set(ENABLE_LIBOMPTARGET OFF)
 endif()
 

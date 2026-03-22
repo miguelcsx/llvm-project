@@ -22,6 +22,17 @@
 .sw?
 #macOS specific
 .DS_Store
+# Metal offload intermediate files
+*.air
+*.metallib
+# Offload compilation intermediate files
+*-host-*.bc
+*-host-*.i
+*-host-*.o
+*-host-*.s
+*-openmp-*.bc
+*-openmp-*.i
+*-openmp-*.out
 
 # Ignore the user specified CMake presets in subproject directories.
 /*/CMakeUserPresets.json

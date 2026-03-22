@@ -3,6 +3,47 @@
 # similar although simpler functionality. We should figure out how to merge
 # the two files.
 
+function(llvm_append_metal_spirv_runtime_target)
+  if(NOT APPLE)
+    return()
+  endif()
+
+  if(NOT LIBOMPTARGET_ENABLE_EXPERIMENTAL_APPLE_SUPPORT)
+    return()
+  endif()
+
+  if(NOT "openmp" IN_LIST LLVM_ENABLE_RUNTIMES)
+    return()
+  endif()
+
+  if(NOT "offload" IN_LIST LLVM_ENABLE_RUNTIMES)
+    return()
+  endif()
+
+  if(DEFINED LIBOMPTARGET_PLUGINS_TO_BUILD)
+    set(_plugins "${LIBOMPTARGET_PLUGINS_TO_BUILD}")
+    if(NOT _plugins STREQUAL "all" AND NOT "metal" IN_LIST _plugins)
+      return()
+    endif()
+  endif()
+
+  foreach(_target ${LLVM_RUNTIME_TARGETS})
+    if(_target MATCHES "^spirv(32|64)")
+      return()
+    endif()
+  endforeach()
+
+  if(LLVM_RUNTIME_TARGETS)
+    list(APPEND LLVM_RUNTIME_TARGETS "spirv64-unknown-unknown")
+  else()
+    set(LLVM_RUNTIME_TARGETS "default;spirv64-unknown-unknown")
+  endif()
+
+  set(LLVM_RUNTIME_TARGETS "${LLVM_RUNTIME_TARGETS}" PARENT_SCOPE)
+endfunction()
+
+llvm_append_metal_spirv_runtime_target()
+
 set(COMMON_CMAKE_ARGS "-DHAVE_LLVM_LIT=ON;-DCLANG_RESOURCE_DIR=${CLANG_RESOURCE_DIR}")
 foreach(proj ${LLVM_ENABLE_RUNTIMES})
   set(proj_dir "${CMAKE_CURRENT_SOURCE_DIR}/../../${proj}")
