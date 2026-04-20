@@ -1,0 +1,13 @@
+{
+  "profile_id": "minimal",
+  "label": "Minimal",
+  "description": "Fast baseline visibility for diagnostics, remarks, and command metadata.",
+  "default_capabilities": [
+    "build.command.meta",
+    "clang.diag.summary",
+    "llvm.remarks.summary"
+  ],
+  "l2_capabilities": [
+    "llvm.ir.summary"
+  ]
+}

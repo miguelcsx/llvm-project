@@ -48,7 +48,7 @@ class SourceLocation:
 class CompilationUnit:
     name: str
     path: str
-    artifacts: Dict[FileType, List[str]]
+    representations: Dict[FileType, List[str]]
     metadata: Dict[str, Any] = None
 
     def __post_init__(self):

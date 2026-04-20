@@ -1,0 +1,17 @@
+{
+  "profile_id": "balanced",
+  "label": "Balanced",
+  "description": "Production default for dashboard and compare workflows with code, object, and debug coverage.",
+  "default_capabilities": [
+    "build.command.meta",
+    "clang.diag.summary",
+    "clang.ast.summary",
+    "llvm.remarks.summary",
+    "llvm.ir.summary",
+    "llvm.pass.stats",
+    "llvm.obj.summary"
+  ],
+  "l2_capabilities": [
+    "llvm.debug.summary"
+  ]
+}

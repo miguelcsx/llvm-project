@@ -62,6 +62,7 @@ public:
       -> llvm::SmallVector<std::string, 8>;
   auto getAllGeneratedFiles() const -> const
       std::unordered_map<std::string, llvm::SmallVector<std::string, 8>> &;
+  auto findSourceForArtifactPath(llvm::StringRef filePath) const -> std::string;
   auto makeArtifactPath(llvm::StringRef category, llvm::StringRef sourcePath,
                         llvm::StringRef extension) const -> std::string;
 

@@ -4,334 +4,339 @@
 
 /**
  * Tab Manager
- * Handles tab switching and navigation in the LLVM Advisor dashboard
+ * Provides deterministic tab registration, navigation, UI state updates,
+ * and URL hash synchronization for the LLVM Advisor frontend.
  */
 
+const DEFAULT_TAB_ID = "dashboard";
+const TAB_BUTTON_SELECTOR = ".tab-button";
+const TAB_CONTENT_SELECTOR = ".tab-content";
+const ACTIVE_BUTTON_CLASSES = ["active", "border-llvm-blue", "text-llvm-blue"];
+const INACTIVE_BUTTON_CLASSES = [
+    "border-transparent",
+    "text-gray-500",
+    "hover:text-gray-700",
+    "hover:border-gray-300",
+];
+const HIDDEN_CONTENT_CLASS = "hidden";
+const CONTENT_TRANSITION_CLASS = "tab-transition";
+
+function normalizeTabId(value) {
+    return typeof value === "string" ? value.trim() : "";
+}
+
+function getHashTabId() {
+    return normalizeTabId(window.location.hash.replace(/^#/, ""));
+}
+
+function createTabRecord(button, content, isActive = false) {
+    return {
+        button,
+        content,
+        isLoaded: isActive,
+        title: button.textContent.trim(),
+    };
+}
+
 export class TabManager {
-  constructor() {
-    this.currentTab = 'dashboard';
-    this.tabs = new Map();
-    this.onTabChangeCallback = null;
-  }
+    constructor(options = {}) {
+        this.defaultTabId =
+            normalizeTabId(options.defaultTabId) || DEFAULT_TAB_ID;
+        this.buttonSelector = options.buttonSelector || TAB_BUTTON_SELECTOR;
+        this.contentSelector = options.contentSelector || TAB_CONTENT_SELECTOR;
 
-  /**
-   * Initialize the tab manager
-   */
-  init(options = {}) {
-    this.onTabChangeCallback = options.onTabChange;
+        this.tabs = new Map();
+        this.tabOrder = [];
+        this.currentTab = this.defaultTabId;
+        this.onTabChangeCallback = null;
+        this.isSwitching = false;
+    }
 
-    // Register all tabs
-    this.registerTabs();
+    init(options = {}) {
+        this.onTabChangeCallback = options.onTabChange || null;
 
-    // Setup event listeners
-    this.setupEventListeners();
+        this.registerTabs();
+        this.setupEventListeners();
 
-    // Set initial tab state
-    this.setActiveTab(this.currentTab);
+        const initialTabId = this.resolveInitialTabId();
+        this.currentTab = initialTabId;
+        this.setActiveTab(initialTabId);
+        this.syncHash(initialTabId, true);
+    }
 
-    console.log('Tab manager initialized');
-  }
+    registerTabs() {
+        this.tabs.clear();
+        this.tabOrder = [];
 
-  /**
-   * Register all available tabs
-   */
-  registerTabs() {
-    const tabButtons = document.querySelectorAll('.tab-button');
-    const tabContents = document.querySelectorAll('.tab-content');
+        const tabButtons = document.querySelectorAll(this.buttonSelector);
+        tabButtons.forEach((button) => {
+            const tabId = normalizeTabId(button.dataset.tab);
+            if (!tabId) {
+                return;
+            }
 
-    tabButtons.forEach(button => {
-      const tabId = button.dataset.tab;
-      const content = document.getElementById(`${tabId}-content`);
+            const content = document.getElementById(`${tabId}-content`);
+            if (!content) {
+                return;
+            }
 
-      if (content) {
-        this.tabs.set(tabId, {
-          button,
-          content,
-          isLoaded : tabId === 'dashboard', // Dashboard is loaded by default
-          title : button.textContent.trim()
+            const isDefault = tabId === this.defaultTabId;
+            this.tabs.set(tabId, createTabRecord(button, content, isDefault));
+            this.tabOrder.push(tabId);
         });
-      }
-    });
 
-    console.log(`📋 Registered ${this.tabs.size} tabs:`,
-                Array.from(this.tabs.keys()));
-  }
-
-  /**
-   * Setup event listeners for tab interactions
-   */
-  setupEventListeners() {
-    // Handle tab button clicks
-    document.addEventListener('click', (event) => {
-      if (event.target.classList.contains('tab-button')) {
-        event.preventDefault();
-        const tabId = event.target.dataset.tab;
-        if (tabId && this.tabs.has(tabId)) {
-          this.switchTab(tabId);
+        if (!this.tabs.has(this.defaultTabId) && this.tabOrder.length > 0) {
+            this.currentTab = this.tabOrder[0];
         }
-      }
-    });
+    }
 
-    // Handle keyboard navigation (Tab key to cycle through tabs)
-    document.addEventListener('keydown', (event) => {
-      if (event.key === 'Tab' && event.ctrlKey) {
+    setupEventListeners() {
+        document.addEventListener("click", this.handleDocumentClick);
+        document.addEventListener("keydown", this.handleKeyDown);
+        window.addEventListener("hashchange", this.handleHashChange);
+    }
+
+    destroy() {
+        document.removeEventListener("click", this.handleDocumentClick);
+        document.removeEventListener("keydown", this.handleKeyDown);
+        window.removeEventListener("hashchange", this.handleHashChange);
+    }
+
+    handleDocumentClick = (event) => {
+        const button = event.target.closest(this.buttonSelector);
+        if (!button) {
+            return;
+        }
+
+        const tabId = normalizeTabId(button.dataset.tab);
+        if (!this.tabs.has(tabId)) {
+            return;
+        }
+
         event.preventDefault();
-        this.switchToNextTab();
-      }
-    });
+        void this.switchTab(tabId);
+    };
 
-    // Handle URL hash changes for deep linking
-    window.addEventListener('hashchange', () => { this.handleHashChange(); });
+    handleKeyDown = (event) => {
+        if (!event.ctrlKey || event.key !== "Tab") {
+            return;
+        }
 
-    // Set initial hash if none exists
-    if (!window.location.hash && this.currentTab) {
-      window.location.hash = `#${this.currentTab}`;
+        event.preventDefault();
+        if (event.shiftKey) {
+            void this.switchToPreviousTab();
+            return;
+        }
+
+        void this.switchToNextTab();
+    };
+
+    handleHashChange = () => {
+        const hashTabId = getHashTabId();
+        if (
+            !hashTabId ||
+            hashTabId === this.currentTab ||
+            !this.tabs.has(hashTabId)
+        ) {
+            return;
+        }
+
+        void this.switchTab(hashTabId, { updateHash: false });
+    };
+
+    resolveInitialTabId() {
+        const hashTabId = getHashTabId();
+        if (hashTabId && this.tabs.has(hashTabId)) {
+            return hashTabId;
+        }
+
+        if (this.tabs.has(this.defaultTabId)) {
+            return this.defaultTabId;
+        }
+
+        return this.tabOrder[0] || this.defaultTabId;
     }
-  }
 
-  /**
-   * Switch to a specific tab
-   */
-  async switchTab(tabId) {
-    if (!this.tabs.has(tabId) || tabId === this.currentTab) {
-      return;
+    async switchTab(tabId, options = {}) {
+        const normalizedTabId = normalizeTabId(tabId);
+        if (!this.tabs.has(normalizedTabId)) {
+            return false;
+        }
+
+        if (this.isSwitching || normalizedTabId === this.currentTab) {
+            return false;
+        }
+
+        const previousTabId = this.currentTab;
+        this.isSwitching = true;
+
+        try {
+            this.currentTab = normalizedTabId;
+            this.setActiveTab(normalizedTabId);
+
+            if (options.updateHash !== false) {
+                this.syncHash(normalizedTabId);
+            }
+
+            await this.notifyTabChange(normalizedTabId, previousTabId);
+            this.markTabAsLoaded(normalizedTabId);
+            this.trackTabSwitch(normalizedTabId, previousTabId);
+
+            return true;
+        } catch (error) {
+            this.currentTab = previousTabId;
+            this.setActiveTab(previousTabId);
+
+            if (options.updateHash !== false) {
+                this.syncHash(previousTabId);
+            }
+
+            this.showTabSwitchError(normalizedTabId, error);
+            return false;
+        } finally {
+            this.isSwitching = false;
+        }
     }
 
-    const previousTab = this.currentTab;
-
-    try {
-      // Update current tab
-      this.currentTab = tabId;
-
-      // Update UI
-      this.setActiveTab(tabId);
-
-      // Update URL hash
-      window.location.hash = `#${tabId}`;
-
-      // Call the tab change callback
-      if (this.onTabChangeCallback) {
-        await this.onTabChangeCallback(tabId, previousTab);
-      }
-
-      // Mark tab as loaded
-      const tab = this.tabs.get(tabId);
-      if (tab) {
-        tab.isLoaded = true;
-      }
-
-      // Track tab switch for analytics
-      this.trackTabSwitch(tabId, previousTab);
-
-      console.log(`📱 Switched from ${previousTab} to ${tabId}`);
-
-    } catch (error) {
-      console.error(`Failed to switch to tab ${tabId}:`, error);
-
-      // Revert to previous tab on error
-      this.currentTab = previousTab;
-      this.setActiveTab(previousTab);
-
-      // Show error notification
-      this.showTabSwitchError(tabId, error.message);
+    async switchToNextTab() {
+        const nextTabId = this.getAdjacentTabId(1);
+        if (nextTabId) {
+            await this.switchTab(nextTabId);
+        }
     }
-  }
 
-  /**
-   * Set the visual active state for a tab
-   */
-  setActiveTab(tabId) {
-    // Update all tab buttons
-    this.tabs.forEach((tab, id) => {
-      if (id === tabId) {
-        // Activate current tab
-        tab.button.classList.add('active');
-        tab.button.classList.remove('text-gray-500', 'hover:text-gray-700',
-                                    'hover:border-gray-300',
-                                    'border-transparent');
-        tab.button.classList.add('border-llvm-blue', 'text-llvm-blue');
-
-        // Show current tab content
-        tab.content.classList.remove('hidden');
-        tab.content.classList.add('tab-transition');
-
-      } else {
-        // Deactivate other tabs
-        tab.button.classList.remove('active', 'border-llvm-blue',
-                                    'text-llvm-blue');
-        tab.button.classList.add('border-transparent', 'text-gray-500',
-                                 'hover:text-gray-700',
-                                 'hover:border-gray-300');
-
-        // Hide other tab contents
-        tab.content.classList.add('hidden');
-        tab.content.classList.remove('tab-transition');
-      }
-    });
-  }
-
-  /**
-   * Switch to the next tab in sequence
-   */
-  switchToNextTab() {
-    const tabIds = Array.from(this.tabs.keys());
-    const currentIndex = tabIds.indexOf(this.currentTab);
-    const nextIndex = (currentIndex + 1) % tabIds.length;
-    const nextTabId = tabIds[nextIndex];
-
-    this.switchTab(nextTabId);
-  }
-
-  /**
-   * Switch to the previous tab in sequence
-   */
-  switchToPreviousTab() {
-    const tabIds = Array.from(this.tabs.keys());
-    const currentIndex = tabIds.indexOf(this.currentTab);
-    const prevIndex = currentIndex === 0 ? tabIds.length - 1 : currentIndex - 1;
-    const prevTabId = tabIds[prevIndex];
-
-    this.switchTab(prevTabId);
-  }
-
-  /**
-   * Handle URL hash changes for deep linking
-   */
-  handleHashChange() {
-    const hash = window.location.hash.slice(1); // Remove the '#'
-
-    if (hash && this.tabs.has(hash) && hash !== this.currentTab) {
-      this.switchTab(hash);
+    async switchToPreviousTab() {
+        const previousTabId = this.getAdjacentTabId(-1);
+        if (previousTabId) {
+            await this.switchTab(previousTabId);
+        }
     }
-  }
 
-  /**
-   * Get the currently active tab
-   */
-  getCurrentTab() { return this.currentTab; }
+    getAdjacentTabId(direction) {
+        if (this.tabOrder.length === 0) {
+            return null;
+        }
 
-  /**
-   * Get information about a specific tab
-   */
-  getTabInfo(tabId) { return this.tabs.get(tabId); }
+        const currentIndex = this.tabOrder.indexOf(this.currentTab);
+        if (currentIndex === -1) {
+            return this.tabOrder[0];
+        }
 
-  /**
-   * Get all registered tabs
-   */
-  getAllTabs() {
-    const result = {};
-    this.tabs.forEach((tab, id) => {
-      result[id] = {
-        title : tab.title,
-        isLoaded : tab.isLoaded,
-        isActive : id === this.currentTab
-      };
-    });
-    return result;
-  }
-
-  /**
-   * Check if a tab has been loaded
-   */
-  isTabLoaded(tabId) {
-    const tab = this.tabs.get(tabId);
-    return tab ? tab.isLoaded : false;
-  }
-
-  /**
-   * Mark a tab as loaded
-   */
-  markTabAsLoaded(tabId) {
-    const tab = this.tabs.get(tabId);
-    if (tab) {
-      tab.isLoaded = true;
+        const nextIndex =
+            (currentIndex + direction + this.tabOrder.length) %
+            this.tabOrder.length;
+        return this.tabOrder[nextIndex];
     }
-  }
 
-  /**
-   * Show loading state for a specific tab
-   */
-  showTabLoading(tabId) {
-    const tab = this.tabs.get(tabId);
-    if (tab && tab.content) {
-      const loadingHtml = `
-                <div class="flex items-center justify-center h-64">
-                    <div class="text-center">
-                        <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-llvm-blue"></div>
-                        <p class="mt-2 text-gray-500">Loading ${
-          tab.title}...</p>
-                    </div>
+    setActiveTab(tabId) {
+        this.tabs.forEach((tab, id) => {
+            const isActive = id === tabId;
+            this.updateButtonState(tab.button, isActive);
+            this.updateContentState(tab.content, isActive);
+        });
+    }
+
+    updateButtonState(button, isActive) {
+        if (isActive) {
+            button.classList.add(...ACTIVE_BUTTON_CLASSES);
+            button.classList.remove(...INACTIVE_BUTTON_CLASSES);
+            button.setAttribute("aria-selected", "true");
+            button.setAttribute("tabindex", "0");
+            return;
+        }
+
+        button.classList.remove(...ACTIVE_BUTTON_CLASSES);
+        button.classList.add(...INACTIVE_BUTTON_CLASSES);
+        button.setAttribute("aria-selected", "false");
+        button.setAttribute("tabindex", "-1");
+    }
+
+    updateContentState(content, isActive) {
+        content.classList.toggle(HIDDEN_CONTENT_CLASS, !isActive);
+        content.classList.toggle(CONTENT_TRANSITION_CLASS, isActive);
+    }
+
+    syncHash(tabId, replace = false) {
+        const nextHash = `#${tabId}`;
+        if (window.location.hash === nextHash) {
+            return;
+        }
+
+        if (replace) {
+            history.replaceState(null, "", nextHash);
+            return;
+        }
+
+        history.replaceState(null, "", nextHash);
+    }
+
+    async notifyTabChange(nextTabId, previousTabId) {
+        if (typeof this.onTabChangeCallback !== "function") {
+            return;
+        }
+
+        await this.onTabChangeCallback(nextTabId, previousTabId);
+    }
+
+    markTabAsLoaded(tabId) {
+        const tab = this.tabs.get(tabId);
+        if (tab) {
+            tab.isLoaded = true;
+        }
+    }
+
+    trackTabSwitch(nextTabId, previousTabId) {
+        void nextTabId;
+        void previousTabId;
+    }
+
+    showTabSwitchError(tabId, error) {
+        void tabId;
+        void error;
+    }
+
+    getCurrentTab() {
+        return this.currentTab;
+    }
+
+    getTabInfo(tabId) {
+        return this.tabs.get(normalizeTabId(tabId)) || null;
+    }
+
+    getAllTabs() {
+        return this.tabOrder.reduce((result, tabId) => {
+            const tab = this.tabs.get(tabId);
+            if (!tab) {
+                return result;
+            }
+
+            result[tabId] = {
+                title: tab.title,
+                isLoaded: tab.isLoaded,
+                isActive: tabId === this.currentTab,
+            };
+            return result;
+        }, {});
+    }
+
+    isTabLoaded(tabId) {
+        const tab = this.tabs.get(normalizeTabId(tabId));
+        return Boolean(tab?.isLoaded);
+    }
+
+    showTabLoading(tabId) {
+        const tab = this.tabs.get(normalizeTabId(tabId));
+        if (!tab?.content) {
+            return;
+        }
+
+        tab.content.innerHTML = `
+            <div class="flex items-center justify-center h-64">
+                <div class="text-center">
+                    <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-llvm-blue"></div>
+                    <p class="mt-2 text-gray-500">Loading ${tab.title}...</p>
                 </div>
-            `;
-
-      // Store original content if not already stored
-      if (!tab.originalContent) {
-        tab.originalContent = tab.content.innerHTML;
-      }
-
-      tab.content.innerHTML = loadingHtml;
+            </div>
+        `;
     }
-  }
-
-  /**
-   * Hide loading state for a specific tab
-   */
-  hideTabLoading(tabId) {
-    const tab = this.tabs.get(tabId);
-    if (tab && tab.originalContent) {
-      tab.content.innerHTML = tab.originalContent;
-      delete tab.originalContent;
-    }
-  }
-
-  /**
-   * Show error state for tab switching
-   */
-  showTabSwitchError(tabId, errorMessage) {
-    console.error(`Tab switch error for ${tabId}:`, errorMessage);
-
-    const tab = this.tabs.get(tabId);
-    if (tab) {
-      alert(`Failed to switch to ${tab.title}: ${errorMessage}`);
-    }
-  }
-
-  /**
-   * Track tab switches for analytics/debugging
-   */
-  trackTabSwitch(newTab, previousTab) {
-    const timestamp = new Date().toISOString();
-
-    console.log(
-        `Tab Analytics: ${previousTab} -> ${newTab} at ${timestamp}`);
-  }
-
-  /**
-   * Enable/disable a specific tab
-   */
-  setTabEnabled(tabId, enabled) {
-    const tab = this.tabs.get(tabId);
-    if (tab) {
-      if (enabled) {
-        tab.button.removeAttribute('disabled');
-        tab.button.classList.remove('opacity-50', 'cursor-not-allowed');
-      } else {
-        tab.button.setAttribute('disabled', 'true');
-        tab.button.classList.add('opacity-50', 'cursor-not-allowed');
-
-        // If this was the current tab, switch to another one
-        if (tabId === this.currentTab) {
-          const enabledTabs =
-              Array.from(this.tabs.keys())
-                  .filter(
-                      id => id !== tabId &&
-                            !this.tabs.get(id).button.hasAttribute('disabled'));
-
-          if (enabledTabs.length > 0) {
-            this.switchTab(enabledTabs[0]);
-          }
-        }
-      }
-    }
-  }
 }

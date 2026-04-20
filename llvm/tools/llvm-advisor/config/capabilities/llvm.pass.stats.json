@@ -1,0 +1,16 @@
+{
+  "capability_id": "llvm.pass.stats",
+  "capability_version": "1.0.0",
+  "execution_mode": "library",
+  "cost_class": "cheap",
+  "required_inputs": ["unit.command", "artifact.remarks"],
+  "depends_on": ["llvm.remarks.summary"],
+  "produces": [
+    {
+      "schema_id": "capability/llvm.pass.stats/output@1",
+      "content_type": "application/json"
+    }
+  ],
+  "supports_scope": ["unit", "snapshot"],
+  "feature_flags": []
+}

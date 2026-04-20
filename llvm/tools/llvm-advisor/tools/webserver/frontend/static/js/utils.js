@@ -4,475 +4,394 @@
 
 /**
  * Utility Functions
- * Common helper functions used throughout the LLVM Advisor dashboard
+ * Shared formatting and data helpers for the LLVM Advisor frontend.
  */
 
-export class Utils {
-  /**
-   * Format numbers with proper separators and abbreviations
-   */
-  static formatNumber(num) {
-    if (num === null || num === undefined)
-      return '0';
+const EMPTY_TEXT = "";
+const UNKNOWN_LABEL = "Unknown";
+const DEFAULT_PERCENT_DECIMALS = 1;
+const DEFAULT_TRUNCATE_LENGTH = 50;
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB"];
+const BYTE_BASE = 1024;
 
-    const number = parseInt(num);
-    if (isNaN(number))
-      return '0';
+const FILE_TYPE_LABELS = Object.freeze({
+    opt_record: "Optimization Records",
+    opt_remarks: "Optimization Remarks",
+    time_trace: "Time Trace",
+    runtime_trace: "Runtime Trace",
+    binary_size: "Binary Size",
+    compilation_units: "Compilation Units",
+    diagnostics: "Diagnostics",
+    clang_diagnostics: "Clang Diagnostics",
+    coverage_report: "Coverage Report",
+    profile_data: "Profile Data",
+    ast_dump: "AST Dump",
+    ir_code: "IR Code",
+    assembly_code: "Assembly Code",
+    debug_info: "Debug Info",
+    static_analysis: "Static Analysis",
+    memory_usage: "Memory Usage",
+    compilation_commands: "Compilation Commands",
+    build_log: "Build Log",
+    link_map: "Link Map",
+    symbol_table: "Symbol Table",
+});
 
-    // Use compact notation for large numbers
-    if (number >= 1000000) {
-      return `${(number / 1000000).toFixed(1)}M`;
-    } else if (number >= 1000) {
-      return `${(number / 1000).toFixed(1)}K`;
+const PHASE_LABELS = Object.freeze({
+    frontend: "Frontend",
+    backend: "Backend",
+    codegen: "Code Generation",
+    optimization: "Optimization",
+    linking: "Linking",
+    parsing: "Parsing",
+    semantic: "Semantic Analysis",
+    irgen: "IR Generation",
+    opt: "Optimization",
+    asm: "Assembly Generation",
+    obj: "Object Generation",
+});
+
+const SECTION_LABELS = Object.freeze({
+    ".text": "Code (.text)",
+    ".data": "Data (.data)",
+    ".bss": "BSS (.bss)",
+    ".rodata": "Read-Only Data (.rodata)",
+    ".debug": "Debug Info (.debug)",
+    ".symtab": "Symbol Table (.symtab)",
+    ".strtab": "String Table (.strtab)",
+    ".rela": "Relocations (.rela)",
+    ".dynamic": "Dynamic (.dynamic)",
+    ".interp": "Interpreter (.interp)",
+    ".note": "Notes (.note)",
+    ".comment": "Comments (.comment)",
+    ".plt": "PLT (.plt)",
+    ".got": "GOT (.got)",
+});
+
+const DIAGNOSTIC_LEVEL_LABELS = Object.freeze({
+    error: "Error",
+    warning: "Warning",
+    note: "Note",
+    info: "Info",
+    fatal: "Fatal Error",
+    remark: "Remark",
+});
+
+const DEFAULT_COLORS = Object.freeze([
+    "#3b82f6",
+    "#10b981",
+    "#f59e0b",
+    "#ef4444",
+    "#8b5cf6",
+    "#06b6d4",
+    "#84cc16",
+    "#f97316",
+    "#ec4899",
+    "#6366f1",
+    "#14b8a6",
+    "#f59e0b",
+]);
+
+function isNil(value) {
+    return value === null || value === undefined;
+}
+
+function isObject(value) {
+    return value !== null && typeof value === "object";
+}
+
+function toInteger(value, fallback = 0) {
+    const number = Number.parseInt(value, 10);
+    return Number.isNaN(number) ? fallback : number;
+}
+
+function toFloat(value, fallback = 0) {
+    const number = Number.parseFloat(value);
+    return Number.isNaN(number) ? fallback : number;
+}
+
+function withFallback(value, fallback) {
+    return isNil(value) ? fallback : value;
+}
+
+function formatCompactNumber(value) {
+    if (value >= 1_000_000) {
+        return `${(value / 1_000_000).toFixed(1)}M`;
     }
 
-    return number.toLocaleString();
-  }
-
-  /**
-   * Format file type names for display
-   */
-  static formatFileType(type) {
-    if (!type)
-      return 'Unknown';
-
-    const typeMap = {
-      'opt_record' : 'Optimization Records',
-      'opt_remarks' : 'Optimization Remarks',
-      'time_trace' : 'Time Trace',
-      'runtime_trace' : 'Runtime Trace',
-      'binary_size' : 'Binary Size',
-      'compilation_units' : 'Compilation Units',
-      'diagnostics' : 'Diagnostics',
-      'clang_diagnostics' : 'Clang Diagnostics',
-      'coverage_report' : 'Coverage Report',
-      'profile_data' : 'Profile Data',
-      'ast_dump' : 'AST Dump',
-      'ir_code' : 'IR Code',
-      'assembly_code' : 'Assembly Code',
-      'debug_info' : 'Debug Info',
-      'static_analysis' : 'Static Analysis',
-      'memory_usage' : 'Memory Usage',
-      'compilation_commands' : 'Compilation Commands',
-      'build_log' : 'Build Log',
-      'link_map' : 'Link Map',
-      'symbol_table' : 'Symbol Table'
-    };
-
-    return typeMap[type] || this.capitalize(type.replace(/_/g, ' '));
-  }
-
-  /**
-   * Capitalize the first letter of a string
-   */
-  static capitalize(str) {
-    if (!str)
-      return '';
-    return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
-  }
-
-  /**
-   * Format compilation phase names for display
-   */
-  static formatPhaseName(name) {
-    if (!name)
-      return 'Unknown Phase';
-
-    // Common LLVM phase name mappings
-    const phaseMap = {
-      'frontend' : 'Frontend',
-      'backend' : 'Backend',
-      'codegen' : 'Code Generation',
-      'optimization' : 'Optimization',
-      'linking' : 'Linking',
-      'parsing' : 'Parsing',
-      'semantic' : 'Semantic Analysis',
-      'irgen' : 'IR Generation',
-      'opt' : 'Optimization',
-      'asm' : 'Assembly Generation',
-      'obj' : 'Object Generation'
-    };
-
-    // Try direct mapping first
-    if (phaseMap[name.toLowerCase()]) {
-      return phaseMap[name.toLowerCase()];
+    if (value >= 1_000) {
+        return `${(value / 1_000).toFixed(1)}K`;
     }
 
-    // Format by replacing underscores and capitalizing
-    return name.replace(/_/g, ' ')
-        .replace(/\b\w/g, l => l.toUpperCase())
-        .replace(/\bIr\b/g, 'IR')
-        .replace(/\bLlvm\b/g, 'LLVM')
-        .replace(/\bCpp\b/g, 'C++')
-        .replace(/\bAst\b/g, 'AST');
-  }
+    return value.toLocaleString();
+}
 
-  /**
-   * Format time values (milliseconds) for display
-   */
-  static formatTime(timeMs) {
-    if (timeMs === null || timeMs === undefined)
-      return '0ms';
+function normalizeWords(value) {
+    return String(value).replace(/[_-]+/g, " ").trim();
+}
 
-    const time = parseFloat(timeMs);
-    if (isNaN(time))
-      return '0ms';
+function titleize(value) {
+    return normalizeWords(value).replace(/\b\w/g, (letter) =>
+        letter.toUpperCase(),
+    );
+}
 
-    if (time < 1000) {
-      return `${time.toFixed(0)}ms`;
-    } else if (time < 60000) {
-      return `${(time / 1000).toFixed(2)}s`;
-    } else if (time < 3600000) {
-      const minutes = Math.floor(time / 60000);
-      const seconds = ((time % 60000) / 1000).toFixed(0);
-      return `${minutes}m ${seconds}s`;
-    } else {
-      const hours = Math.floor(time / 3600000);
-      const minutes = Math.floor((time % 3600000) / 60000);
-      return `${hours}h ${minutes}m`;
+function applyKnownAcronyms(value) {
+    return value
+        .replace(/\bIr\b/g, "IR")
+        .replace(/\bLlvm\b/g, "LLVM")
+        .replace(/\bCpp\b/g, "C++")
+        .replace(/\bAst\b/g, "AST");
+}
+
+function formatDurationParts(timeMs) {
+    if (timeMs < 1_000) {
+        return `${timeMs.toFixed(0)}ms`;
     }
-  }
 
-  /**
-   * Format byte sizes for display
-   */
-  static formatBytes(bytes) {
-    if (bytes === null || bytes === undefined)
-      return '0 B';
+    if (timeMs < 60_000) {
+        return `${(timeMs / 1_000).toFixed(2)}s`;
+    }
 
-    const size = parseInt(bytes);
-    if (isNaN(size) || size === 0)
-      return '0 B';
+    if (timeMs < 3_600_000) {
+        const minutes = Math.floor(timeMs / 60_000);
+        const seconds = ((timeMs % 60_000) / 1_000).toFixed(0);
+        return `${minutes}m ${seconds}s`;
+    }
 
-    const units = [ 'B', 'KB', 'MB', 'GB', 'TB' ];
-    const threshold = 1024;
+    const hours = Math.floor(timeMs / 3_600_000);
+    const minutes = Math.floor((timeMs % 3_600_000) / 60_000);
+    return `${hours}h ${minutes}m`;
+}
 
-    if (size < threshold)
-      return `${size} B`;
+function formatByteUnits(size) {
+    if (size < BYTE_BASE) {
+        return `${size} B`;
+    }
 
-    let unitIndex = 0;
     let value = size;
+    let unitIndex = 0;
 
-    while (value >= threshold && unitIndex < units.length - 1) {
-      value /= threshold;
-      unitIndex++;
+    while (value >= BYTE_BASE && unitIndex < BYTE_UNITS.length - 1) {
+        value /= BYTE_BASE;
+        unitIndex += 1;
     }
 
-    return `${value.toFixed(1)} ${units[unitIndex]}`;
-  }
+    return `${value.toFixed(1)} ${BYTE_UNITS[unitIndex]}`;
+}
 
-  /**
-   * Format binary section names for display
-   */
-  static formatSectionName(name) {
-    if (!name)
-      return 'Unknown Section';
-
-    // Common binary section mappings
-    const sectionMap = {
-      '.text' : 'Code (.text)',
-      '.data' : 'Data (.data)',
-      '.bss' : 'BSS (.bss)',
-      '.rodata' : 'Read-Only Data (.rodata)',
-      '.debug' : 'Debug Info (.debug)',
-      '.symtab' : 'Symbol Table (.symtab)',
-      '.strtab' : 'String Table (.strtab)',
-      '.rela' : 'Relocations (.rela)',
-      '.dynamic' : 'Dynamic (.dynamic)',
-      '.interp' : 'Interpreter (.interp)',
-      '.note' : 'Notes (.note)',
-      '.comment' : 'Comments (.comment)',
-      '.plt' : 'PLT (.plt)',
-      '.got' : 'GOT (.got)'
-    };
-
-    // Try direct mapping first
-    if (sectionMap[name]) {
-      return sectionMap[name];
+function cloneValue(value) {
+    if (!isObject(value)) {
+        return value;
     }
 
-    // If it starts with a dot, assume it's a section name
-    if (name.startsWith('.')) {
-      return `${this.capitalize(name.slice(1))} (${name})`;
+    if (value instanceof Date) {
+        return new Date(value.getTime());
     }
 
-    return this.capitalize(name);
-  }
-
-  /**
-   * Format percentage values
-   */
-  static formatPercentage(value, decimals = 1) {
-    if (value === null || value === undefined)
-      return '0%';
-
-    const num = parseFloat(value);
-    if (isNaN(num))
-      return '0%';
-
-    return `${num.toFixed(decimals)}%`;
-  }
-
-  /**
-   * Format diagnostic level names
-   */
-  static formatDiagnosticLevel(level) {
-    const levelMap = {
-      'error' : 'Error',
-      'warning' : 'Warning',
-      'note' : 'Note',
-      'info' : 'Info',
-      'fatal' : 'Fatal Error',
-      'remark' : 'Remark'
-    };
-
-    return levelMap[level?.toLowerCase()] ||
-           this.capitalize(level || 'unknown');
-  }
-
-  /**
-   * Truncate text to specified length with ellipsis
-   */
-  static truncateText(text, maxLength = 50) {
-    if (!text)
-      return '';
-    if (text.length <= maxLength)
-      return text;
-
-    return text.substring(0, maxLength - 3) + '...';
-  }
-
-  /**
-   * Debounce function calls
-   */
-  static debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
-      clearTimeout(timeout);
-      timeout = setTimeout(later, wait);
-    };
-  }
-
-  /**
-   * Throttle function calls
-   */
-  static throttle(func, limit) {
-    let inThrottle;
-    return function executedFunction(...args) {
-      if (!inThrottle) {
-        func.apply(this, args);
-        inThrottle = true;
-        setTimeout(() => inThrottle = false, limit);
-      }
-    };
-  }
-
-  /**
-   * Deep clone an object
-   */
-  static deepClone(obj) {
-    if (obj === null || typeof obj !== 'object')
-      return obj;
-    if (obj instanceof Date)
-      return new Date(obj.getTime());
-    if (obj instanceof Array)
-      return obj.map(item => this.deepClone(item));
-    if (typeof obj === 'object') {
-      const clonedObj = {};
-      Object.keys(obj).forEach(
-          key => { clonedObj[key] = this.deepClone(obj[key]); });
-      return clonedObj;
-    }
-  }
-
-  /**
-   * Check if two objects are equal (deep comparison)
-   */
-  static isEqual(obj1, obj2) {
-    if (obj1 === obj2)
-      return true;
-    if (obj1 == null || obj2 == null)
-      return false;
-    if (typeof obj1 !== typeof obj2)
-      return false;
-
-    if (typeof obj1 === 'object') {
-      const keys1 = Object.keys(obj1);
-      const keys2 = Object.keys(obj2);
-
-      if (keys1.length !== keys2.length)
-        return false;
-
-      for (let key of keys1) {
-        if (!keys2.includes(key))
-          return false;
-        if (!this.isEqual(obj1[key], obj2[key]))
-          return false;
-      }
-
-      return true;
+    if (Array.isArray(value)) {
+        return value.map((item) => cloneValue(item));
     }
 
-    return obj1 === obj2;
-  }
-
-  /**
-   * Generate a random color
-   */
-  static getRandomColor() {
-    const colors = [
-      '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4',
-      '#84cc16', '#f97316', '#ec4899', '#6366f1', '#14b8a6', '#f59e0b'
-    ];
-    return colors[Math.floor(Math.random() * colors.length)];
-  }
-
-  /**
-   * Get contrast color (black or white) for a given background color
-   */
-  static getContrastColor(hexColor) {
-    // Remove # if present
-    hexColor = hexColor.replace('#', '');
-
-    // Convert to RGB
-    const r = parseInt(hexColor.substr(0, 2), 16);
-    const g = parseInt(hexColor.substr(2, 2), 16);
-    const b = parseInt(hexColor.substr(4, 2), 16);
-
-    // Calculate luminance
-    const luminance = ((0.299 * r) + (0.587 * g) + (0.114 * b)) / 255;
-
-    return luminance > 0.5 ? '#000000' : '#ffffff';
-  }
-
-  /**
-   * Format date/time for display
-   */
-  static formatDateTime(date, options = {}) {
-    if (!date)
-      return 'Unknown';
-
-    const dateObj = date instanceof Date ? date : new Date(date);
-
-    const defaultOptions = {
-      year : 'numeric',
-      month : 'short',
-      day : 'numeric',
-      hour : '2-digit',
-      minute : '2-digit'
-    };
-
-    return dateObj.toLocaleDateString('en-US', {...defaultOptions, ...options});
-  }
-
-  /**
-   * Format relative time (e.g., "2 minutes ago")
-   */
-  static formatRelativeTime(date) {
-    if (!date)
-      return 'Unknown';
-
-    const now = new Date();
-    const dateObj = date instanceof Date ? date : new Date(date);
-    const diffMs = now - dateObj;
-
-    const diffSecs = Math.floor(diffMs / 1000);
-    const diffMins = Math.floor(diffSecs / 60);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffSecs < 60)
-      return 'Just now';
-    if (diffMins < 60)
-      return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
-    if (diffHours < 24)
-      return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
-    if (diffDays < 7)
-      return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
-
-    return this.formatDateTime(dateObj);
-  }
-
-  /**
-   * Validate email address
-   */
-  static isValidEmail(email) {
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return emailRegex.test(email);
-  }
-
-  /**
-   * Escape HTML to prevent XSS
-   */
-  static escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-  }
-
-  /**
-   * Generate a simple hash from a string
-   */
-  static hashString(str) {
-    let hash = 0;
-    if (str.length === 0)
-      return hash;
-
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-
-    return Math.abs(hash);
-  }
-
-  /**
-   * Check if value is empty (null, undefined, empty string, empty array, etc.)
-   */
-  static isEmpty(value) {
-    if (value == null)
-      return true;
-    if (typeof value === 'string')
-      return value.trim().length === 0;
-    if (Array.isArray(value))
-      return value.length === 0;
-    if (typeof value === 'object')
-      return Object.keys(value).length === 0;
-    return false;
-  }
-
-  /**
-   * Sort array of objects by a property
-   */
-  static sortBy(array, property, ascending = true) {
-    return array.sort((a, b) => {
-      const aVal = a[property];
-      const bVal = b[property];
-
-      if (aVal < bVal)
-        return ascending ? -1 : 1;
-      if (aVal > bVal)
-        return ascending ? 1 : -1;
-      return 0;
-    });
-  }
-
-  /**
-   * Group array of objects by a property
-   */
-  static groupBy(array, property) {
-    return array.reduce((groups, item) => {
-      const key = item[property];
-      if (!groups[key]) {
-        groups[key] = [];
-      }
-      groups[key].push(item);
-      return groups;
+    return Object.keys(value).reduce((result, key) => {
+        result[key] = cloneValue(value[key]);
+        return result;
     }, {});
-  }
+}
+
+function arraysEqual(left, right) {
+    if (left.length !== right.length) {
+        return false;
+    }
+
+    return left.every((value, index) => Utils.isEqual(value, right[index]));
+}
+
+function objectsEqual(left, right) {
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+
+    if (leftKeys.length !== rightKeys.length) {
+        return false;
+    }
+
+    return leftKeys.every(
+        (key) =>
+            rightKeys.includes(key) && Utils.isEqual(left[key], right[key]),
+    );
+}
+
+function createDelayedInvoker(callback, wait, context, mode) {
+    let timeoutId = null;
+    let isThrottled = false;
+
+    return function wrappedFunction(...args) {
+        const invoke = () => callback.apply(context || this, args);
+
+        if (mode === "debounce") {
+            window.clearTimeout(timeoutId);
+            timeoutId = window.setTimeout(invoke, wait);
+            return;
+        }
+
+        if (isThrottled) {
+            return;
+        }
+
+        invoke();
+        isThrottled = true;
+        timeoutId = window.setTimeout(() => {
+            isThrottled = false;
+        }, wait);
+    };
+}
+
+export class Utils {
+    static formatNumber(value) {
+        if (isNil(value)) {
+            return "0";
+        }
+
+        const number = toInteger(value, 0);
+        return formatCompactNumber(number);
+    }
+
+    static formatFileType(type) {
+        if (!type) {
+            return UNKNOWN_LABEL;
+        }
+
+        return FILE_TYPE_LABELS[type] || titleize(type);
+    }
+
+    static capitalize(value) {
+        if (!value) {
+            return EMPTY_TEXT;
+        }
+
+        return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+    }
+
+    static formatPhaseName(name) {
+        if (!name) {
+            return "Unknown Phase";
+        }
+
+        const normalizedName = String(name).toLowerCase();
+        const knownLabel = PHASE_LABELS[normalizedName];
+        if (knownLabel) {
+            return knownLabel;
+        }
+
+        return applyKnownAcronyms(titleize(name));
+    }
+
+    static formatTime(timeMs) {
+        if (isNil(timeMs)) {
+            return "0ms";
+        }
+
+        return formatDurationParts(toFloat(timeMs, 0));
+    }
+
+    static formatBytes(bytes) {
+        if (isNil(bytes)) {
+            return "0 B";
+        }
+
+        const size = toInteger(bytes, 0);
+        if (size <= 0) {
+            return "0 B";
+        }
+
+        return formatByteUnits(size);
+    }
+
+    static formatSectionName(name) {
+        if (!name) {
+            return "Unknown Section";
+        }
+
+        if (SECTION_LABELS[name]) {
+            return SECTION_LABELS[name];
+        }
+
+        if (name.startsWith(".")) {
+            return `${Utils.capitalize(name.slice(1))} (${name})`;
+        }
+
+        return Utils.capitalize(name);
+    }
+
+    static formatPercentage(value, decimals = DEFAULT_PERCENT_DECIMALS) {
+        if (isNil(value)) {
+            return "0%";
+        }
+
+        return `${toFloat(value, 0).toFixed(decimals)}%`;
+    }
+
+    static formatDiagnosticLevel(level) {
+        const normalizedLevel = String(
+            withFallback(level, "unknown"),
+        ).toLowerCase();
+        return (
+            DIAGNOSTIC_LEVEL_LABELS[normalizedLevel] ||
+            Utils.capitalize(normalizedLevel)
+        );
+    }
+
+    static truncateText(text, maxLength = DEFAULT_TRUNCATE_LENGTH) {
+        if (!text) {
+            return EMPTY_TEXT;
+        }
+
+        if (text.length <= maxLength) {
+            return text;
+        }
+
+        return `${text.substring(0, maxLength - 3)}...`;
+    }
+
+    static debounce(callback, wait) {
+        return createDelayedInvoker(callback, wait, null, "debounce");
+    }
+
+    static throttle(callback, wait) {
+        return createDelayedInvoker(callback, wait, null, "throttle");
+    }
+
+    static deepClone(value) {
+        return cloneValue(value);
+    }
+
+    static isEqual(left, right) {
+        if (left === right) {
+            return true;
+        }
+
+        if (isNil(left) || isNil(right)) {
+            return false;
+        }
+
+        if (typeof left !== typeof right) {
+            return false;
+        }
+
+        if (Array.isArray(left) && Array.isArray(right)) {
+            return arraysEqual(left, right);
+        }
+
+        if (isObject(left) && isObject(right)) {
+            return objectsEqual(left, right);
+        }
+
+        return false;
+    }
+
+    static getRandomColor() {
+        return DEFAULT_COLORS[
+            Math.floor(Math.random() * DEFAULT_COLORS.length)
+        ];
+    }
 }

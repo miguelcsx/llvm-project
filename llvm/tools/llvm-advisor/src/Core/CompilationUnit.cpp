@@ -88,6 +88,20 @@ CompilationUnit::getAllGeneratedFiles() const {
   return generatedFiles;
 }
 
+std::string CompilationUnit::findSourceForArtifactPath(llvm::StringRef FilePath) const {
+  llvm::StringRef FileName = llvm::sys::path::filename(FilePath);
+  for (const auto &Source : info.sources) {
+    if (Source.isHeader)
+      continue;
+
+    std::string Stem = makeUniqueStem(Source.path);
+    if (FileName == Stem || FileName.starts_with(Stem + "."))
+      return Source.path;
+  }
+
+  return "";
+}
+
 std::string CompilationUnit::buildCategoryDir(llvm::StringRef Category) const {
   llvm::SmallString<128> Dir;
   llvm::sys::path::append(Dir, workDir, "units", info.name, Category);

@@ -4,433 +4,950 @@
 
 /**
  * API Client
- * Handles all communication with the LLVM Advisor API backend
+ * Handles communication with the LLVM Advisor API backend with
+ * consistent request processing, caching, and response normalization.
  */
 
-import {Utils} from './utils.js';
+const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_HEADERS = Object.freeze({
+    Accept: "application/json",
+});
+
+const CACHEABLE_METHODS = new Set(["GET"]);
+
+function isPlainObject(value) {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeBaseUrl(baseUrl = "") {
+    return String(baseUrl).replace(/\/+$/, "");
+}
+
+function normalizeMethod(method) {
+    return String(method || "GET").toUpperCase();
+}
+
+function buildQueryString(params = {}) {
+    const searchParams = new URLSearchParams();
+
+    Object.entries(params).forEach(([key, value]) => {
+        if (value === undefined || value === null || value === "") {
+            return;
+        }
+
+        if (Array.isArray(value)) {
+            value.forEach((item) => {
+                if (item !== undefined && item !== null && item !== "") {
+                    searchParams.append(key, String(item));
+                }
+            });
+            return;
+        }
+
+        searchParams.append(key, String(value));
+    });
+
+    const query = searchParams.toString();
+    return query ? `?${query}` : "";
+}
+
+function stableStringify(value) {
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+
+    if (isPlainObject(value)) {
+        const entries = Object.keys(value)
+            .sort()
+            .map(
+                (key) =>
+                    `${JSON.stringify(key)}:${stableStringify(value[key])}`,
+            );
+        return `{${entries.join(",")}}`;
+    }
+
+    return JSON.stringify(value);
+}
+
+function cloneResponseData(data) {
+    if (typeof structuredClone === "function") {
+        return structuredClone(data);
+    }
+
+    return JSON.parse(JSON.stringify(data));
+}
+
+function createErrorResponse(error, status = 500) {
+    return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        status,
+        data: null,
+    };
+}
 
 export class ApiClient {
-  constructor(baseUrl = '') {
-    this.baseUrl = baseUrl;
-    this.cache = new Map();
-    this.cacheTimeout = 5 * 60 * 1000; // 5 minutes
-  }
+    constructor(options = {}) {
+        const normalizedOptions = isPlainObject(options)
+            ? options
+            : { baseUrl: options };
 
-  /**
-   * Generic HTTP request method with error handling and caching
-   */
-  async request(endpoint, options = {}) {
-    const url = `${this.baseUrl}/api/${endpoint}`;
-    const cacheKey = `${url}${JSON.stringify(options)}`;
-
-    // Check cache first for GET requests
-    if (!options.method || options.method === 'GET') {
-      const cached = this.cache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < this.cacheTimeout) {
-        return cached.data;
-      }
+        this.baseUrl = normalizeBaseUrl(normalizedOptions.baseUrl || "");
+        this.cacheTtlMs =
+            normalizedOptions.cacheTimeout ?? DEFAULT_CACHE_TTL_MS;
+        this.cache = new Map();
+        this.snapshotId = normalizedOptions.snapshotId || null;
     }
 
-    try {
-      const response = await fetch(url, {
-        method : 'GET',
-        headers : {'Content-Type' : 'application/json', ...options.headers},
-        ...options
-      });
+    async request(endpoint, options = {}) {
+        const requestConfig = this._buildRequestConfig(endpoint, options);
+        const cacheKey = this._buildCacheKey(requestConfig);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+        if (this._isCacheable(requestConfig.method)) {
+            const cachedResponse = this._getCachedResponse(cacheKey);
+            if (cachedResponse) {
+                return cachedResponse;
+            }
+        }
 
-      const data = await response.json();
+        try {
+            const response = await fetch(
+                requestConfig.url,
+                requestConfig.fetchOptions,
+            );
+            const normalizedResponse = await this._normalizeResponse(response);
 
-      // Cache successful GET responses
-      if (!options.method || options.method === 'GET') {
-        this.cache.set(cacheKey, {data, timestamp : Date.now()});
-      }
+            if (
+                this._isCacheable(requestConfig.method) &&
+                normalizedResponse.success
+            ) {
+                this._setCachedResponse(cacheKey, normalizedResponse);
+            }
 
-      return data;
-
-    } catch (error) {
-      console.error(`API request failed for ${endpoint}:`, error);
-      return {
-        success : false,
-        error : error.message,
-        status : error.status || 500
-      };
+            return normalizedResponse;
+        } catch (error) {
+            return createErrorResponse(error);
+        }
     }
-  }
 
-  /**
-   * Clear all cached responses
-   */
-  clearCache() { this.cache.clear(); }
-
-  // ============================================
-  // Core API Endpoints
-  // ============================================
-
-  /**
-   * Get system health status
-   */
-  async getHealth() { return await this.request('health'); }
-
-  /**
-   * Get all compilation units
-   */
-  async getUnits() { return await this.request('units'); }
-
-  /**
-   * Get detailed information for a specific unit
-   */
-  async getUnitDetail(unitName) {
-    return await this.request(`units/${encodeURIComponent(unitName)}`);
-  }
-
-  /**
-   * Get overall summary statistics
-   */
-  async getSummary() { return await this.request('summary'); }
-
-  /**
-   * Get available artifact types
-   */
-  async getArtifactTypes() { return await this.request('artifacts'); }
-
-  /**
-   * Get aggregated data for a specific file type
-   */
-  async getArtifactData(fileType) {
-    return await this.request(`artifacts/${encodeURIComponent(fileType)}`);
-  }
-
-  /**
-   * Get build dependencies data
-   */
-  async getBuildDependencies() {
-    return await this.request('artifacts/dependencies');
-  }
-
-  /**
-   * Get specific file content
-   */
-  async getFileContent(unitName, fileType, fileName, full = false) {
-    const params = full ? '?full=true' : '';
-    return await this.request(
-        `file/${encodeURIComponent(unitName)}/${encodeURIComponent(fileType)}/${
-            encodeURIComponent(fileName)}${params}`);
-  }
-
-  // ============================================
-  // Specialized Endpoints - Remarks
-  // ============================================
-
-  /**
-   * Get optimization remarks overview
-   */
-  async getRemarksOverview() { return await this.request('remarks/overview'); }
-
-  /**
-   * Get remarks analysis by optimization passes
-   */
-  async getRemarksPasses() { return await this.request('remarks/passes'); }
-
-  /**
-   * Get remarks analysis by functions
-   */
-  async getRemarksFunctions() {
-    return await this.request('remarks/functions');
-  }
-
-  /**
-   * Get optimization hotspots
-   */
-  async getRemarksHotspots() { return await this.request('remarks/hotspots'); }
-
-  // ============================================
-  // Specialized Endpoints - Diagnostics
-  // ============================================
-
-  /**
-   * Get diagnostics overview
-   */
-  async getDiagnosticsOverview() {
-    return await this.request('diagnostics/overview');
-  }
-
-  /**
-   * Get diagnostics by level (error, warning, note)
-   */
-  async getDiagnosticsByLevel() {
-    return await this.request('diagnostics/by-level');
-  }
-
-  /**
-   * Get diagnostics by files
-   */
-  async getDiagnosticsFiles() {
-    return await this.request('diagnostics/files');
-  }
-
-  /**
-   * Get diagnostic patterns
-   */
-  async getDiagnosticsPatterns() {
-    return await this.request('diagnostics/patterns');
-  }
-
-  // ============================================
-  // Specialized Endpoints - Compilation Analysis
-  // ============================================
-
-  /**
-   * Get ftime report data for compilation timing
-   */
-  async getFTimeReport() {
-    return await this.request('artifacts/ftime-report');
-  }
-
-  /**
-   * Get version info data (clang version, target, etc.)
-   */
-  async getVersionInfo() {
-    return await this.request('artifacts/version-info');
-  }
-
-  /**
-   * Get compilation phases bindings (from -ccc-print-bindings)
-   */
-  async getCompilationPhasesBindings() {
-    return await this.request('compilation-phases/bindings');
-  }
-
-  // ============================================
-  // Specialized Endpoints - Time Trace
-  // ============================================
-
-  /**
-   * Get time trace overview
-   */
-  async getTimeTraceOverview() {
-    return await this.request('time-trace/overview');
-  }
-
-  /**
-   * Get time trace timeline (with optional limit)
-   */
-  async getTimeTraceTimeline(limit = 1000) {
-    return await this.request(`time-trace/timeline?limit=${limit}`);
-  }
-
-  /**
-   * Get time trace hotspots
-   */
-  async getTimeTraceHotspots() {
-    return await this.request('time-trace/hotspots');
-  }
-
-  /**
-   * Get time trace categories analysis
-   */
-  async getTimeTraceCategories() {
-    return await this.request('time-trace/categories');
-  }
-
-  /**
-   * Get parallelism analysis
-   */
-  async getTimeTraceParallelism() {
-    return await this.request('time-trace/parallelism');
-  }
-
-  // ============================================
-  // Specialized Endpoints - Binary Size
-  // ============================================
-
-  /**
-   * Get binary size overview
-   */
-  async getBinarySizeOverview() {
-    return await this.request('binary-size/overview');
-  }
-
-  /**
-   * Get binary sections analysis
-   */
-  async getBinarySizeSections() {
-    return await this.request('binary-size/sections');
-  }
-
-  /**
-   * Get binary size optimization opportunities
-   */
-  async getBinarySizeOptimization() {
-    return await this.request('binary-size/optimization');
-  }
-
-  /**
-   * Get binary size comparison across units
-   */
-  async getBinarySizeComparison() {
-    return await this.request('binary-size/comparison');
-  }
-
-  // ============================================
-  // Specialized Endpoints - Runtime Trace
-  // ============================================
-
-  /**
-   * Get runtime trace overview
-   */
-  async getRuntimeTraceOverview() {
-    return await this.request('runtime-trace/overview');
-  }
-
-  /**
-   * Get runtime trace timeline
-   */
-  async getRuntimeTraceTimeline(limit = 1000) {
-    return await this.request(`runtime-trace/timeline?limit=${limit}`);
-  }
-
-  /**
-   * Get runtime trace hotspots
-   */
-  async getRuntimeTraceHotspots() {
-    return await this.request('runtime-trace/hotspots');
-  }
-
-  /**
-   * Get runtime trace categories
-   */
-  async getRuntimeTraceCategories() {
-    return await this.request('runtime-trace/categories');
-  }
-
-  /**
-   * Get runtime parallelism analysis
-   */
-  async getRuntimeTraceParallelism() {
-    return await this.request('runtime-trace/parallelism');
-  }
-
-  // ============================================
-  // Specialized Endpoints - Code Explorer
-  // ============================================
-
-  /**
-   * Get list of available source files for a specific unit
-   */
-  async getSourceFiles(unitName = null) {
-    const params = unitName ? `?unit=${encodeURIComponent(unitName)}` : '';
-    return await this.request(`explorer/files${params}`);
-  }
-
-  /**
-   * Get source code for a specific file
-   */
-  async getSourceCode(filePath) {
-    return await this.request(
-        `explorer/source/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get assembly output for a specific file
-   */
-  async getAssembly(filePath) {
-    return await this.request(
-        `explorer/assembly/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get LLVM IR for a specific file
-   */
-  async getLLVMIR(filePath) {
-    return await this.request(`explorer/ir/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get optimized LLVM IR for a specific file
-   */
-  async getOptimizedIR(filePath) {
-    return await this.request(
-        `explorer/optimized-ir/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get object code for a specific file
-   */
-  async getObjectCode(filePath) {
-    return await this.request(
-        `explorer/object/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get AST JSON for a specific file
-   */
-  async getASTJSON(filePath) {
-    return await this.request(
-        `explorer/ast-json/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get preprocessed source for a specific file
-   */
-  async getPreprocessed(filePath) {
-    return await this.request(
-        `explorer/preprocessed/${encodeURIComponent(filePath)}`);
-  }
-
-  /**
-   * Get macro expansion for a specific file
-   */
-  async getMacroExpansion(filePath) {
-    return await this.request(
-        `explorer/macro-expansion/${encodeURIComponent(filePath)}`);
-  }
-
-  // ============================================
-  // Utility Methods
-  // ============================================
-
-  /**
-   * Check if the API is available
-   */
-  async isApiAvailable() {
-    try {
-      const health = await this.getHealth();
-      return health.success && health.data.status === 'healthy';
-    } catch (error) {
-      return false;
+    clearCache() {
+        this.cache.clear();
     }
-  }
 
-  /**
-   * Get cache statistics
-   */
-  getCacheStats() {
-    return {size : this.cache.size, keys : Array.from(this.cache.keys())};
-  }
+    invalidateCache(predicate = null) {
+        if (typeof predicate !== "function") {
+            this.clearCache();
+            return;
+        }
 
-  /**
-   * Batch multiple API requests
-   */
-  async batchRequests(requests) {
-    const promises =
-        requests.map(req => typeof req === 'string'
-                                ? this.request(req)
-                                : this.request(req.endpoint, req.options));
+        for (const key of this.cache.keys()) {
+            if (predicate(key)) {
+                this.cache.delete(key);
+            }
+        }
+    }
 
-    const results = await Promise.allSettled(promises);
+    getCacheStats() {
+        return {
+            size: this.cache.size,
+            keys: Array.from(this.cache.keys()),
+        };
+    }
 
-    return results.map(
-        (result, index) => ({
-          request : requests[index],
-          success : result.status === 'fulfilled' && result.value.success,
-          data : result.status === 'fulfilled' ? result.value.data : null,
-          error : result.status === 'rejected'
-                      ? result.reason.message
-                      : (result.value.success ? null : result.value.error)
-        }));
-  }
+    async batchRequests(requests) {
+        const settledResults = await Promise.allSettled(
+            requests.map((request) => this._executeBatchRequest(request)),
+        );
+
+        return settledResults.map((result, index) => {
+            if (result.status === "fulfilled") {
+                return {
+                    request: requests[index],
+                    success: Boolean(result.value?.success),
+                    data: result.value?.data ?? null,
+                    error: result.value?.error ?? null,
+                    status: result.value?.status ?? 200,
+                };
+            }
+
+            return {
+                request: requests[index],
+                success: false,
+                data: null,
+                error:
+                    result.reason instanceof Error
+                        ? result.reason.message
+                        : String(result.reason),
+                status: 500,
+            };
+        });
+    }
+
+    async isApiAvailable() {
+        const health = await this.getHealth();
+        return health.success && health.data?.status === "healthy";
+    }
+
+    async getHealth() {
+        if (this.snapshotId) {
+            return this.request(this._joinPath("snapshots", this.snapshotId, "health"));
+        }
+        return this.request("health");
+    }
+
+    async getCapabilities() {
+        return this.request("capabilities");
+    }
+
+    async getRepresentationCapabilities() {
+        return this.request("representation-capabilities");
+    }
+
+    async getSnapshots() {
+        return this.request("snapshots");
+    }
+
+    async getSnapshot(snapshotId) {
+        return this.request(this._joinPath("snapshots", snapshotId));
+    }
+
+    async createSnapshot(payload) {
+        return this.request("snapshots", {
+            method: "POST",
+            body: payload,
+        });
+    }
+
+    async query(payload) {
+        return this.request("query", {
+            method: "POST",
+            body: payload,
+        });
+    }
+
+    async compare(payload) {
+        return this.request("compare", {
+            method: "POST",
+            body: payload,
+        });
+    }
+
+    async getJobs() {
+        return this.request("jobs");
+    }
+
+    async getJob(jobId) {
+        return this.request(this._joinPath("jobs", jobId));
+    }
+
+    async createJob(payload) {
+        return this.request("jobs", {
+            method: "POST",
+            body: payload,
+        });
+    }
+
+    async cancelJob(jobId) {
+        return this.request(this._joinPath("jobs", jobId, "cancel"), {
+            method: "POST",
+        });
+    }
+
+    async getUnits() {
+        return this.request(
+            this._joinPath("snapshots", this._requireSnapshotId(), "units"),
+        );
+    }
+
+    async getUnitDetail(unitName) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "units",
+                unitName,
+            ),
+        );
+    }
+
+    async getSummary() {
+        return this.request(
+            this._joinPath("snapshots", this._requireSnapshotId(), "summary"),
+        );
+    }
+
+    async getRepresentationTypes() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "representations",
+            ),
+        );
+    }
+
+    async getRepresentationData(representationKind) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "representations",
+                representationKind,
+            ),
+        );
+    }
+
+    async queryRepresentationCatalog({
+        unitName = null,
+        sourceRef = null,
+        representationKind = null,
+    } = {}) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "representation-query",
+            ),
+            {
+                query: {
+                    unit: unitName || undefined,
+                    source: sourceRef || undefined,
+                    kind: representationKind || undefined,
+                },
+            },
+        );
+    }
+
+    async requestRepresentations(payload, snapshotId = null) {
+        const targetSnapshotId = snapshotId || this._requireSnapshotId();
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                targetSnapshotId,
+                "representation-requests",
+            ),
+            {
+                method: "POST",
+                body: payload,
+            },
+        );
+    }
+
+    async getBuildDependencies() {
+        return this.getRepresentationData("dependencies");
+    }
+
+    async getFileContent(unitName, fileType, fileName, full = false) {
+        void full;
+        switch (fileType) {
+            case "assembly":
+                return this.getAssembly(fileName, unitName);
+            case "ir":
+                return this.getLLVMIR(fileName, unitName);
+            case "optimized-ir":
+                return this.getOptimizedIR(fileName, unitName);
+            case "object":
+                return this.getObjectCode(fileName, unitName);
+            case "ast-json":
+                return this.getASTJSON(fileName, unitName);
+            case "preprocessed":
+                return this.getPreprocessed(fileName, unitName);
+            case "macro-expansion":
+                return this.getMacroExpansion(fileName, unitName);
+            default:
+                return createErrorResponse(
+                    new Error(`Unsupported representation kind '${fileType}'`),
+                    400,
+                );
+        }
+    }
+
+    async getRemarksOverview() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "remarks",
+                "overview",
+            ),
+        );
+    }
+
+    async getRemarksPasses() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "remarks",
+                "passes",
+            ),
+        );
+    }
+
+    async getRemarksFunctions() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "remarks",
+                "functions",
+            ),
+        );
+    }
+
+    async getRemarksHotspots() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "remarks",
+                "hotspots",
+            ),
+        );
+    }
+
+    async getDiagnosticsOverview() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "diagnostics",
+                "overview",
+            ),
+        );
+    }
+
+    async getDiagnosticsByLevel() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "diagnostics",
+                "by-level",
+            ),
+        );
+    }
+
+    async getDiagnosticsFiles() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "diagnostics",
+                "files",
+            ),
+        );
+    }
+
+    async getDiagnosticsPatterns() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "diagnostics",
+                "patterns",
+            ),
+        );
+    }
+
+    async getFTimeReport() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "representations",
+                "ftime-report",
+            ),
+        );
+    }
+
+    async getVersionInfo() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "representations",
+                "version-info",
+            ),
+        );
+    }
+
+    async getCompilationPhasesBindings() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "compilation-phases",
+                "bindings",
+            ),
+        );
+    }
+
+    async getTimeTraceOverview() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "time-trace",
+                "overview",
+            ),
+        );
+    }
+
+    async getTimeTraceTimeline(limit = 1000) {
+        return this.request(this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "time-trace",
+                "timeline",
+            ), {
+            query: { limit },
+        });
+    }
+
+    async getTimeTraceHotspots() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "time-trace",
+                "hotspots",
+            ),
+        );
+    }
+
+    async getTimeTraceCategories() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "time-trace",
+                "categories",
+            ),
+        );
+    }
+
+    async getTimeTraceParallelism() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "time-trace",
+                "parallelism",
+            ),
+        );
+    }
+
+    async getBinarySizeOverview() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "binary-size",
+                "overview",
+            ),
+        );
+    }
+
+    async getBinarySizeSections() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "binary-size",
+                "sections",
+            ),
+        );
+    }
+
+    async getBinarySizeOptimization() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "binary-size",
+                "optimization",
+            ),
+        );
+    }
+
+    async getBinarySizeComparison() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "binary-size",
+                "comparison",
+            ),
+        );
+    }
+
+    async getAnalysisData(analysisType, subEndpoint = "overview", query = {}) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                analysisType,
+                subEndpoint,
+            ),
+            { query },
+        );
+    }
+
+    async getRuntimeTraceOverview() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "runtime-trace",
+                "overview",
+            ),
+        );
+    }
+
+    async getRuntimeTraceTimeline(limit = 1000) {
+        return this.request(this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "runtime-trace",
+                "timeline",
+            ), {
+            query: { limit },
+        });
+    }
+
+    async getRuntimeTraceHotspots() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "runtime-trace",
+                "hotspots",
+            ),
+        );
+    }
+
+    async getRuntimeTraceCategories() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "runtime-trace",
+                "categories",
+            ),
+        );
+    }
+
+    async getRuntimeTraceParallelism() {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "analysis",
+                "runtime-trace",
+                "parallelism",
+            ),
+        );
+    }
+
+    async getSourceFiles(unitName = null) {
+        return this.request(this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "files",
+            ), {
+            query: { unit: unitName || undefined },
+        });
+    }
+
+    async getSourceCode(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "source",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getAssembly(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "assembly",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getLLVMIR(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "ir",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getOptimizedIR(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "optimized-ir",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getObjectCode(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "object",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getASTJSON(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "ast-json",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getPreprocessed(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "preprocessed",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    async getMacroExpansion(filePath, unitName = null) {
+        return this.request(
+            this._joinPath(
+                "snapshots",
+                this._requireSnapshotId(),
+                "explorer",
+                "macro-expansion",
+                filePath,
+            ),
+            {
+                query: { unit: unitName || undefined },
+            },
+        );
+    }
+
+    setSnapshot(snapshotId) {
+        this.snapshotId = snapshotId || null;
+        this.clearCache();
+    }
+
+    _buildRequestConfig(endpoint, options) {
+        const method = normalizeMethod(options.method);
+        const query = buildQueryString(options.query);
+        const normalizedEndpoint = String(endpoint || "").replace(/^\/+/, "");
+        const url = `${this.baseUrl}/api/${normalizedEndpoint}${query}`;
+
+        const headers = {
+            ...DEFAULT_HEADERS,
+            ...(options.headers || {}),
+        };
+
+        const fetchOptions = {
+            method,
+            headers,
+            signal: options.signal,
+        };
+
+        if (options.body !== undefined) {
+            if (isPlainObject(options.body) || Array.isArray(options.body)) {
+                fetchOptions.body = JSON.stringify(options.body);
+                if (!fetchOptions.headers["Content-Type"]) {
+                    fetchOptions.headers["Content-Type"] = "application/json";
+                }
+            } else {
+                fetchOptions.body = options.body;
+            }
+        }
+
+        return {
+            url,
+            method,
+            query: options.query || null,
+            body: options.body,
+            fetchOptions,
+        };
+    }
+
+    _buildCacheKey(requestConfig) {
+        return stableStringify({
+            method: requestConfig.method,
+            url: requestConfig.url,
+            body: requestConfig.body ?? null,
+        });
+    }
+
+    _isCacheable(method) {
+        return CACHEABLE_METHODS.has(method);
+    }
+
+    _getCachedResponse(cacheKey) {
+        const cachedEntry = this.cache.get(cacheKey);
+        if (!cachedEntry) {
+            return null;
+        }
+
+        if (Date.now() > cachedEntry.expiresAt) {
+            this.cache.delete(cacheKey);
+            return null;
+        }
+
+        return cloneResponseData(cachedEntry.data);
+    }
+
+    _setCachedResponse(cacheKey, data) {
+        this.cache.set(cacheKey, {
+            data: cloneResponseData(data),
+            expiresAt: Date.now() + this.cacheTtlMs,
+        });
+    }
+
+    async _normalizeResponse(response) {
+        const contentType = response.headers.get("content-type") || "";
+        const isJson = contentType.includes("application/json");
+
+        let payload = null;
+        try {
+            payload = isJson ? await response.json() : await response.text();
+        } catch (error) {
+            payload = null;
+        }
+
+        if (!response.ok) {
+            const errorMessage =
+                (isPlainObject(payload) &&
+                    (typeof payload.error === "string"
+                        ? payload.error
+                        : payload.error?.message)) ||
+                response.statusText ||
+                `HTTP ${response.status}`;
+
+            return {
+                success: false,
+                error: errorMessage,
+                status: response.status,
+                data: isPlainObject(payload) ? (payload.data ?? null) : payload,
+            };
+        }
+
+        if (isPlainObject(payload) && typeof payload.success === "boolean") {
+            return {
+                success: payload.success,
+                error:
+                    typeof payload.error === "string"
+                        ? payload.error
+                        : payload.error?.message ?? null,
+                status: payload.status ?? response.status,
+                data: payload.data ?? null,
+            };
+        }
+
+        return {
+            success: true,
+            error: null,
+            status: response.status,
+            data: payload,
+        };
+    }
+
+    _joinPath(...segments) {
+        return segments
+            .filter(
+                (segment) =>
+                    segment !== undefined && segment !== null && segment !== "",
+            )
+            .map((segment) => encodeURIComponent(String(segment)))
+            .join("/");
+    }
+
+    _executeBatchRequest(request) {
+        if (typeof request === "string") {
+            return this.request(request);
+        }
+
+        return this.request(request.endpoint, request.options);
+    }
+
+    _requireSnapshotId() {
+        if (!this.snapshotId) {
+            throw new Error("Snapshot is not selected");
+        }
+
+        return this.snapshotId;
+    }
 }

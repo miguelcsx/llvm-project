@@ -44,6 +44,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Analysis/CFGPrinter.h"
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
@@ -54,6 +55,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/GraphWriter.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
@@ -64,6 +66,7 @@
 #include <memory>
 #include <optional>
 #include <system_error>
+#include <vector>
 
 namespace llvm {
 namespace advisor {
@@ -149,6 +152,147 @@ Error emitCFGGraph(StringRef BitcodePath, StringRef OutputFile) {
 
   return createStringError(std::make_error_code(std::errc::invalid_argument),
                            "Module contains no functions for CFG export");
+}
+
+Error emitTextualIR(StringRef BitcodePath, StringRef OutputFile) {
+  LLVMContext Context;
+  SMDiagnostic Err;
+  auto Module = parseIRFile(BitcodePath, Err, Context);
+  if (!Module)
+    return createStringError(std::make_error_code(std::errc::invalid_argument),
+                             "Failed to parse bitcode: " +
+                                 Err.getMessage().str());
+
+  std::error_code EC;
+  raw_fd_ostream OS(OutputFile, EC, sys::fs::OF_Text);
+  if (EC)
+    return createStringError(EC, "Failed to open IR output");
+
+  Module->print(OS, nullptr);
+  return Error::success();
+}
+
+bool isIRInstructionLine(StringRef Line) {
+  StringRef Stripped = Line.trim();
+  if (Stripped.empty() || Stripped.starts_with(";") || Stripped.starts_with("}"))
+    return false;
+
+  StringRef FirstToken = Stripped.split(' ').first;
+  if (FirstToken.ends_with(":"))
+    return false;
+  if (Stripped == "{")
+    return false;
+  return true;
+}
+
+Expected<std::vector<unsigned>> collectIRInstructionLines(StringRef IRPath) {
+  auto BufferOrErr = MemoryBuffer::getFile(IRPath);
+  if (!BufferOrErr)
+    return createStringError(
+        std::make_error_code(std::errc::no_such_file_or_directory),
+        "Failed to open IR file for mapping: " + IRPath.str());
+
+  std::vector<unsigned> Lines;
+  bool InFunction = false;
+  unsigned LineNumber = 0;
+  SmallVector<StringRef, 256> RawLines;
+  BufferOrErr.get()->getBuffer().split(RawLines, '\n');
+  for (StringRef Line : RawLines) {
+    ++LineNumber;
+    StringRef Stripped = Line.trim();
+    if (Stripped.starts_with("define ")) {
+      InFunction = true;
+      continue;
+    }
+    if (!InFunction)
+      continue;
+    if (Stripped.starts_with("}")) {
+      InFunction = false;
+      continue;
+    }
+    if (isIRInstructionLine(Line))
+      Lines.push_back(LineNumber);
+  }
+  return Lines;
+}
+
+std::string resolveDebugLocationPath(const DILocation &Location) {
+  StringRef FileName = Location.getFilename();
+  StringRef Directory = Location.getDirectory();
+  if (FileName.empty())
+    return "";
+  if (Directory.empty() || sys::path::is_absolute(FileName))
+    return FileName.str();
+
+  SmallString<256> Path(Directory);
+  sys::path::append(Path, FileName);
+  sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+  return Path.str().str();
+}
+
+Error emitIRLineMapping(StringRef IRPath, StringRef MappingOutputFile) {
+  LLVMContext Context;
+  SMDiagnostic Diagnostic;
+  auto Module = parseIRFile(IRPath, Diagnostic, Context);
+  if (!Module)
+    return createStringError(std::make_error_code(std::errc::invalid_argument),
+                             "Failed to parse textual IR for mapping: " +
+                                 IRPath.str());
+
+  auto InstructionLinesOrErr = collectIRInstructionLines(IRPath);
+  if (!InstructionLinesOrErr)
+    return InstructionLinesOrErr.takeError();
+
+  std::vector<const Instruction *> Instructions;
+  for (const Function &Fn : *Module) {
+    if (Fn.isDeclaration())
+      continue;
+    for (const BasicBlock &BB : Fn)
+      for (const Instruction &Inst : BB)
+        Instructions.push_back(&Inst);
+  }
+
+  json::Array Entries;
+  const size_t PairCount =
+      std::min(Instructions.size(), InstructionLinesOrErr->size());
+  for (size_t Index = 0; Index < PairCount; ++Index) {
+    const Instruction &Inst = *Instructions[Index];
+    const DebugLoc &DebugLocation = Inst.getDebugLoc();
+    if (!DebugLocation)
+      continue;
+
+    const DILocation *Location = DebugLocation.get();
+    if (!Location || Location->getLine() == 0)
+      continue;
+
+    json::Object Entry;
+    Entry["representation_line"] =
+        static_cast<int64_t>((*InstructionLinesOrErr)[Index]);
+    Entry["source_line"] = static_cast<int64_t>(Location->getLine());
+    Entry["source_column"] = static_cast<int64_t>(Location->getColumn());
+    Entry["function"] = Inst.getFunction()->getName().str();
+    std::string SourcePath = resolveDebugLocationPath(*Location);
+    if (!SourcePath.empty())
+      Entry["source_path"] = SourcePath;
+    Entries.push_back(std::move(Entry));
+  }
+
+  if (Entries.empty())
+    return Error::success();
+
+  json::Object Root;
+  Root["format"] = "llvm-advisor.line-mapping.v1";
+  Root["representation_kind"] = "ir";
+  Root["entry_count"] = static_cast<int64_t>(Entries.size());
+  Root["entries"] = std::move(Entries);
+
+  std::error_code EC;
+  raw_fd_ostream OS(MappingOutputFile, EC, sys::fs::OF_Text);
+  if (EC)
+    return createStringError(EC, "Failed to open IR mapping output");
+
+  OS << formatv("{0:2}", json::Value(std::move(Root))) << "\n";
+  return Error::success();
 }
 
 class IncludeTreeCallbacks : public clang::PPCallbacks {
@@ -253,7 +397,10 @@ Error DataExtractor::extractAllData(CompilationUnit &Unit,
   sys::fs::create_directories(TempDir + "/coverage");
   sys::fs::create_directories(TempDir + "/time-trace");
   sys::fs::create_directories(TempDir + "/runtime-trace");
-  sys::fs::create_directories(TempDir + "/binary-analysis");
+  sys::fs::create_directories(TempDir + "/binary-size");
+  sys::fs::create_directories(TempDir + "/objdump");
+  sys::fs::create_directories(TempDir + "/symbols");
+  sys::fs::create_directories(TempDir + "/xray");
   sys::fs::create_directories(TempDir + "/pgo");
   sys::fs::create_directories(TempDir + "/ftime-report");
   sys::fs::create_directories(TempDir + "/version-info");
@@ -319,57 +466,43 @@ llvm::SmallVector<std::string, 8>
 DataExtractor::getBaseCompilerArgs(const CompilationUnitInfo &UnitInfo) const {
   llvm::SmallVector<std::string, 8> BaseArgs;
 
-  // Preserve relevant compile flags and handle paired flags that forward
-  // arguments to specific toolchains (e.g. OpenMP target flags).
+  auto isFilteredFlag = [](StringRef Flag) {
+    return Flag == "-c" || Flag == "-S" || Flag == "-E" ||
+           Flag == "-emit-llvm" || Flag == "-fsyntax-only" ||
+           Flag == "-fsave-optimization-record" ||
+           Flag.starts_with("-fsave-optimization-record=") ||
+           Flag == "-fcoverage-mapping" ||
+           Flag.starts_with("-fprofile-instr-generate") ||
+           Flag.starts_with("-foptimization-record-file=");
+  };
+
+  auto isPairedPassthroughFlag = [](StringRef Flag) {
+    return Flag == "-Xopenmp-target" || Flag == "-target" ||
+           Flag == "-isystem" || Flag == "-isysroot" || Flag == "-iprefix" ||
+           Flag == "-iwithprefix" || Flag == "-iwithprefixbefore" ||
+           Flag == "-idirafter" || Flag == "-include" || Flag == "-imacros" ||
+           Flag == "-iquote" || Flag == "--sysroot";
+  };
+
+  // Preserve the normalized compile flags detected for the unit and only drop
+  // transient instrumentation outputs that are injected by the advisor run.
   for (size_t I = 0; I < UnitInfo.compileFlags.size(); ++I) {
     const std::string &Flag = UnitInfo.compileFlags[I];
+    StringRef FlagRef(Flag);
 
-    // Handle paired forwarding flags that must precede their next argument.
-    // Example: -Xopenmp-target -march=sm_70
-    if (StringRef(Flag) == "-Xopenmp-target" ||
-        StringRef(Flag).starts_with("-Xopenmp-target=")) {
-      BaseArgs.push_back(Flag);
-      // If the flag is the two-argument form, also copy the next arg if
-      // present.
-      if (StringRef(Flag) == "-Xopenmp-target" &&
-          I + 1 < UnitInfo.compileFlags.size()) {
-        BaseArgs.push_back(UnitInfo.compileFlags[I + 1]);
-        ++I; // consume the next argument
-      }
+    if (isFilteredFlag(FlagRef))
       continue;
-    }
 
-    // Commonly needed flags for reproducing preprocessing/IR/ASM
-    if (StringRef(Flag).starts_with("-I") ||
-        StringRef(Flag).starts_with("-D") ||
-        StringRef(Flag).starts_with("-U") ||
-        StringRef(Flag).starts_with("-std=") ||
-        StringRef(Flag).starts_with("-m") ||
-        StringRef(Flag).starts_with("-f") ||
-        StringRef(Flag).starts_with("-W") ||
-        StringRef(Flag).starts_with("-O")) {
-      // Skip instrumentation/file-emission flags added by the executor
-      if (StringRef(Flag).starts_with("-fsave-optimization-record") ||
-          StringRef(Flag).starts_with("-fprofile-instr-generate") ||
-          StringRef(Flag).starts_with("-fcoverage-mapping") ||
-          StringRef(Flag).starts_with("-foptimization-record-file")) {
-        continue;
-      }
+    if (isPairedPassthroughFlag(FlagRef)) {
       BaseArgs.push_back(Flag);
-      continue;
-    }
-
-    // Preserve explicit target specification when present
-    if (StringRef(Flag).starts_with("--target=") ||
-        StringRef(Flag) == "-target") {
-      BaseArgs.push_back(Flag);
-      if (StringRef(Flag) == "-target" &&
-          I + 1 < UnitInfo.compileFlags.size()) {
+      if (I + 1 < UnitInfo.compileFlags.size()) {
         BaseArgs.push_back(UnitInfo.compileFlags[I + 1]);
         ++I;
       }
       continue;
     }
+
+    BaseArgs.push_back(Flag);
   }
 
   return BaseArgs;
@@ -495,20 +628,17 @@ Error DataExtractor::runFrontendAction(
 }
 
 Error DataExtractor::extractIR(CompilationUnit &Unit, llvm::StringRef TempDir) {
-  (void)TempDir;
   for (const auto &Source : Unit.getInfo().sources) {
     if (Source.isHeader)
       continue;
 
     std::string OutputFile = Unit.makeArtifactPath("ir", Source.path, ".ll");
-
-    llvm::SmallVector<std::string, 4> ExtraArgs;
-    ExtraArgs.push_back("-c");
+    std::string BitcodeFile = OutputFile + ".bc";
 
     auto Err = runFrontendAction(
-        Unit.getInfo(), Source.path, OutputFile, ExtraArgs,
+        Unit.getInfo(), Source.path, BitcodeFile, {"-c"},
         []() -> std::unique_ptr<clang::FrontendAction> {
-          return std::make_unique<clang::EmitLLVMOnlyAction>();
+          return std::make_unique<clang::EmitBCAction>();
         });
     if (Err) {
       if (Config.getVerbose())
@@ -517,8 +647,26 @@ Error DataExtractor::extractIR(CompilationUnit &Unit, llvm::StringRef TempDir) {
       continue;
     }
 
-    if (sys::fs::exists(OutputFile))
-      Unit.addGeneratedFile("ir", OutputFile);
+    if (!sys::fs::exists(BitcodeFile))
+      continue;
+
+    if (auto RenderErr = emitTextualIR(BitcodeFile, OutputFile)) {
+      if (Config.getVerbose())
+        errs() << "Failed to render IR for " << Source.path << ": "
+               << toString(std::move(RenderErr)) << "\n";
+      sys::fs::remove(BitcodeFile);
+      continue;
+    }
+
+    std::string MappingFile = OutputFile + ".map.json";
+    if (auto MappingErr = emitIRLineMapping(OutputFile, MappingFile)) {
+      if (Config.getVerbose())
+        errs() << "Failed to emit IR line mapping for " << Source.path << ": "
+               << toString(std::move(MappingErr)) << "\n";
+    }
+
+    Unit.addGeneratedFile("ir", OutputFile);
+    sys::fs::remove(BitcodeFile);
   }
   return Error::success();
 }
@@ -1332,11 +1480,11 @@ Error DataExtractor::extractBinarySize(CompilationUnit &Unit,
     if (Source.isHeader)
       continue;
 
-    std::string SourceStem = sys::path::stem(Source.path).str();
     std::string ObjectFile =
-        std::string(TempDir) + "/" + SourceStem + "_size.o";
+        std::string(TempDir) + "/" + sys::path::stem(Source.path).str() +
+        "_size.o";
     std::string SizeFile =
-        std::string(TempDir) + "/binary-analysis/" + SourceStem + ".size.txt";
+        Unit.makeArtifactPath("binary-size", Source.path, ".size.txt");
 
     if (auto CompileErr =
             runFrontendAction(Unit.getInfo(), Source.path, ObjectFile, {"-c"},
@@ -1439,11 +1587,11 @@ Error DataExtractor::extractSymbols(CompilationUnit &Unit,
     if (Source.isHeader)
       continue;
 
-    std::string SourceStem = sys::path::stem(Source.path).str();
     std::string ObjectFile =
-        std::string(TempDir) + "/" + SourceStem + "_symbols.o";
-    std::string SymbolsFile = std::string(TempDir) + "/binary-analysis/" +
-                              SourceStem + ".symbols.txt";
+        std::string(TempDir) + "/" + sys::path::stem(Source.path).str() +
+        "_symbols.o";
+    std::string SymbolsFile =
+        Unit.makeArtifactPath("symbols", Source.path, ".symbols.txt");
 
     if (auto CompileErr =
             runFrontendAction(Unit.getInfo(), Source.path, ObjectFile, {"-c"},
@@ -1540,11 +1688,11 @@ Error DataExtractor::extractObjdump(CompilationUnit &Unit,
     if (Source.isHeader)
       continue;
 
-    std::string SourceStem = sys::path::stem(Source.path).str();
     std::string ObjectFile =
-        std::string(TempDir) + "/" + SourceStem + "_objdump.o";
-    std::string ObjdumpFile = std::string(TempDir) + "/binary-analysis/" +
-                              SourceStem + ".objdump.txt";
+        std::string(TempDir) + "/" + sys::path::stem(Source.path).str() +
+        "_objdump.o";
+    std::string ObjdumpFile =
+        Unit.makeArtifactPath("objdump", Source.path, ".objdump.txt");
 
     if (auto CompileErr =
             runFrontendAction(Unit.getInfo(), Source.path, ObjectFile, {"-c"},
@@ -1613,11 +1761,11 @@ Error DataExtractor::extractXRay(CompilationUnit &Unit,
     if (Source.isHeader)
       continue;
 
-    std::string SourceStem = sys::path::stem(Source.path).str();
     std::string ObjectFile =
-        std::string(TempDir) + "/" + SourceStem + "_xray.o";
+        std::string(TempDir) + "/" + sys::path::stem(Source.path).str() +
+        "_xray.o";
     std::string XrayFile =
-        std::string(TempDir) + "/binary-analysis/" + SourceStem + ".xray.txt";
+        Unit.makeArtifactPath("xray", Source.path, ".xray.txt");
 
     // Compile with XRay instrumentation to an object file (no linking required
     // to inspect the embedded XRay map sections).

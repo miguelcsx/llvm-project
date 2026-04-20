@@ -26,7 +26,7 @@ public:
 
 private:
   static auto findPythonExecutable() -> llvm::Expected<std::string>;
-  static auto getViewerScript() -> llvm::Expected<std::string>;
+  static auto getPythonPackageRoot() -> llvm::Expected<std::string>;
 };
 
 } // namespace llvm::advisor

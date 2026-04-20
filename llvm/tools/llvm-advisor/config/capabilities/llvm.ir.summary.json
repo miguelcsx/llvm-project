@@ -1,0 +1,16 @@
+{
+  "capability_id": "llvm.ir.summary",
+  "capability_version": "1.0.0",
+  "execution_mode": "library",
+  "cost_class": "moderate",
+  "required_inputs": ["unit.command", "artifact.ir"],
+  "depends_on": ["build.command.meta"],
+  "produces": [
+    {
+      "schema_id": "capability/llvm.ir.summary/output@1",
+      "content_type": "application/json"
+    }
+  ],
+  "supports_scope": ["unit", "snapshot"],
+  "feature_flags": []
+}

@@ -120,17 +120,30 @@ static void captureCompileFlags(const llvm::SmallVectorImpl<std::string> &Args,
 
     // Flag argument (starts with '-').
     if (Arg[0] == '-') {
+      auto IsPairedCompileFlag = [&](llvm::StringRef Flag) {
+        return Flag == "-target" || Flag == "-isystem" ||
+               Flag == "-isysroot" || Flag == "-iprefix" ||
+               Flag == "-iwithprefix" || Flag == "-iwithprefixbefore" ||
+               Flag == "-idirafter" || Flag == "-iquote" ||
+               Flag == "-include" || Flag == "-imacros" ||
+               Flag == "--sysroot";
+      };
+
+      if (IsPairedCompileFlag(Arg) && I + 1 < Args.size()) {
+        Unit.compileFlags.push_back(Args[I]);
+        Unit.compileFlags.push_back(Args[I + 1]);
+        ++I;
+        continue;
+      }
+
       // Skip paired flags whose value is the next argument and whose value is
       // not itself a compilation flag (e.g. -o <output>, -MF <depfile>).
-      // We keep -I/-D/-U/-std=/-m*/-f*/-W*/-O* and similar because they
-      // affect re-compilation.
+      // We keep include/sysroot flags because they affect re-compilation.
       if ((Arg == "-o" || Arg == "-MF" || Arg == "-MT" || Arg == "-MQ" ||
-           Arg == "-isystem" || Arg == "-isysroot" || Arg == "-iprefix" ||
-           Arg == "-iwithprefix" || Arg == "-iwithprefixbefore" ||
-           Arg == "-idirafter") &&
+           Arg == "-MJ") &&
           I + 1 < Args.size()) {
-        // Consume flag + value but do NOT push them; output paths and dep-file
-        // paths are irrelevant when replaying compilation for extraction.
+        // Consume flag + value but do NOT push them; output and dep-file paths
+        // are irrelevant when replaying compilation for extraction.
         ++I;
         continue;
       }

@@ -47,7 +47,7 @@ export class ChartComponents {
    */
   init() {
     if (typeof Chart === 'undefined') {
-      console.warn('Chart.js not loaded. Charts will not be available.');
+      
       return;
     }
 
@@ -66,7 +66,7 @@ export class ChartComponents {
     Chart.defaults.animation.duration = 400;
     Chart.defaults.animation.easing = 'easeInOutQuart';
 
-    console.log('Chart components initialized');
+    
   }
 
   /**

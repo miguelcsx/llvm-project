@@ -17,6 +17,7 @@ class BinarySizeParser(BaseParser):
         super().__init__(FileType.BINARY_SIZE)
         # Pattern for size output like: "1234 5678 90 12345 section_name"
         self.size_pattern = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(.+)$")
+        self.section_row_pattern = re.compile(r"^(\S+)\s+(\d+)$")
         # Pattern for nm-style output with size
         self.nm_pattern = re.compile(
             r"^([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([A-Za-z])\s+(.+)$"
@@ -49,10 +50,33 @@ class BinarySizeParser(BaseParser):
     def _parse_size_output(self, lines: List[str]) -> List[BinarySize]:
         size_data = []
         total_size = 0
+        reported_total = None
 
         for line in lines:
             line = line.strip()
             if not line or line.startswith("#"):
+                continue
+
+            if line.startswith("Binary size analysis for:"):
+                continue
+
+            if line.startswith("Generated from object file:"):
+                continue
+
+            if line == "Section                                 Bytes":
+                continue
+
+            section_row_match = self.section_row_pattern.match(line)
+            if section_row_match:
+                section_name = section_row_match.group(1)
+                size = int(section_row_match.group(2))
+
+                if section_name == "TOTAL":
+                    reported_total = size
+                    continue
+
+                size_data.append(BinarySize(section=section_name, size=size))
+                total_size += size
                 continue
 
             # Try standard size format first
@@ -102,6 +126,9 @@ class BinarySizeParser(BaseParser):
                         total_size += size
 
         # Calculate percentages
+        if reported_total is not None and reported_total > 0:
+            total_size = reported_total
+
         if total_size > 0:
             for item in size_data:
                 item.percentage = (item.size / total_size) * 100

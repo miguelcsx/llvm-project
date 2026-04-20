@@ -1,0 +1,16 @@
+{
+  "profile_id": "max-observability",
+  "label": "Max Observability",
+  "description": "Full capability pack for deep investigation and compare drill-down.",
+  "default_capabilities": [
+    "build.command.meta",
+    "clang.diag.summary",
+    "clang.ast.summary",
+    "llvm.remarks.summary",
+    "llvm.ir.summary",
+    "llvm.pass.stats",
+    "llvm.obj.summary",
+    "llvm.debug.summary"
+  ],
+  "l2_capabilities": []
+}
