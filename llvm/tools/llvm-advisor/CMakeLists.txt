@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.18)
+
 set(LLVM_TOOL_LLVM_ADVISOR_BUILD_DEFAULT ON)
 set(LLVM_REQUIRE_EXE_NAMES llvm-advisor)
 

@@ -12,6 +12,7 @@ lldb-tblgen
 lli
 llubi
 llvm-addr2line
+llvm-advisor
 llvm-ar
 llvm-as
 llvm-bcanalyzer
@@ -135,6 +136,7 @@ interested in.
 * {doc}`llvm-tblgen`
 * {doc}`mlir-tblgen`
 * {doc}`lit`
+* {doc}`llvm-advisor`
 * {doc}`llvm-exegesis`
 * {doc}`llvm-ifs`
 * {doc}`llvm-locstats`

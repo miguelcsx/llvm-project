@@ -5,23 +5,30 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
+// Entry point. Initializes LLVM target infrastructure and dispatches to the
+// Client layer. The target registrations are required by the in-process MCA
+// analyzer (MCDisassembler + mca::Context) and by ClangAnalyzerUtils.
+//
+//===----------------------------------------------------------------------===//
 
-#include "llvm/Support/CommandLine.h"
+#include "Client/CLI/CLIHandler.h"
 #include "llvm/Support/InitLLVM.h"
-#include "llvm/Support/raw_ostream.h"
-
-using namespace llvm;
-
-namespace {
-
-cl::OptionCategory AdvisorCategory("llvm-advisor options");
-
-} // namespace
+#include "llvm/Support/TargetSelect.h"
 
 int main(int argc, char **argv) {
-  InitLLVM X(argc, argv);
-  cl::HideUnrelatedOptions(AdvisorCategory);
-  cl::ParseCommandLineOptions(argc, argv, "LLVM Advisor\n");
-  outs() << "llvm-advisor foundation is available.\n";
-  return 0;
+  llvm::InitLLVM X(argc, argv);
+
+  // Register all target backends, MC layers, and disassemblers so that
+  // in-process analyzers (MCA, MCDisassembler, ClangCodeGen) can locate
+  // any target by its triple at runtime.
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
+  llvm::InitializeAllDisassemblers();
+
+  llvm::advisor::CLIHandler CLI;
+  return CLI.run(argc, argv);
 }
